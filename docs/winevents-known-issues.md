@@ -56,14 +56,35 @@ so on its own.
 
 ## Things that will bite the next phase
 
-**Local models cannot emit tool calls in this harness.** `local_heavy`
-(`qwen3.6:27b`) failed 3/3; `main` (`qwen3.5:9b`) failed 4/4 — one hallucinated an
-`<invoke>` tag, one an `<mcp action="callTool">` tag, one timed out with no output.
-The 27B is the model the brief job design designates. Three trials is not proof it
-can never call tools, but as it stands **the 07:15 brief will not call this tool**,
-so phase 1 delivers no user-visible change until a capable model is wired in.
-`claude_tasks` (haiku-4.5) and `coding_agent` (sonnet-5) are already configured and
-call tools reliably.
+**Local model tool calling: the provider was misconfigured, and a model limit sits
+behind it.** An earlier version of this document said local models "cannot emit tool
+calls". That was wrong about the cause. Investigated 2026-08-02:
+
+- The models are capable. `ollama show` reports `tools` for both, and handed a
+  `tools` payload directly, `qwen3.5:9b` returns a textbook structured call
+  (`finish_reason: tool_calls`, correct name and arguments).
+- Ollama is capable, in every shape tested: `/v1/chat/completions` and
+  `/v1/responses`, streaming and non-streaming, all emit the function call.
+- **The provider config was wrong twice.** No `compat.supportsTools` was declared on
+  any model entry, so OpenClaw degraded to describing tools in the prompt — which is
+  why the models emitted `<invoke>` and `<mcp action="callTool">` as *prose*, in
+  Anthropic's syntax, rather than failing to call anything. And `api` was
+  `openai-responses`, whose adapter received Ollama's stream — which demonstrably
+  contains `response.function_call_arguments.done` and the tool name — but
+  classified the turn "reasoning-only" and gave up after two retries. Ollama emits
+  reasoning as `reasoning_summary_text`, not `reasoning_text`.
+- Fixed by declaring `compat: { supportsTools: true, thinkingFormat: "qwen" }` and
+  switching to the native `api: "ollama"` adapter (baseUrl drops `/v1`). The hard
+  failures are gone; plain generation verified working.
+- **A real model limit remains.** With OpenClaw's full agent context (~45 tools),
+  `qwen3.5:9b` still does not emit a genuine call — it confabulates, claiming to
+  have invoked the tool and inventing plausible-looking events. With a single tool
+  and a short prompt it is flawless. Tool *selection* at scale, not tool calling,
+  is what it cannot do.
+
+So the 07:15 brief still will not produce real event data on the 9B, and the 27B is
+untested since the fix. `claude_tasks` (haiku-4.5) and `coding_agent` (sonnet-5)
+call tools reliably and remain the dependable route.
 
 **A capable model and the injection mitigations must land together, never
 model-first.** The digest ships full Windows event message text to the model. Event
