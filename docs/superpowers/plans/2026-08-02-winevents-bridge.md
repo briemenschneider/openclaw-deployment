@@ -1192,7 +1192,22 @@ git commit -m "feat(winevents): register collector as unelevated logon+daily tas
 - Modify: `docker-compose.yml`
 
 **Interfaces:**
-- Produces: `winevents-fwd` container republishing `127.0.0.1:18790` on `172.17.0.1:18790`; named volume `openclaw-connectors` mounted at `/opt/connectors` in the openclaw container.
+- Produces: `winevents-fwd` container republishing `127.0.0.1:18790` on `172.17.0.1:18791`; named volume `openclaw-connectors` mounted at `/opt/connectors` in the openclaw container.
+
+> **Amended after review (Task 5, fix round 1):** the external port below is
+> `18791`, not `18790`. Under WSL2 mirrored networking, Windows and WSL share
+> one port space — once a Windows process holds a port number, WSL cannot bind
+> that same port number on ANY address, including `172.17.0.1`, even though
+> it's a different IP than the Windows listener. Verified directly: binding
+> `172.17.0.1:18790` fails with `Address in use` while the Windows collector
+> holds `127.0.0.1:18790`; binding `172.17.0.1:18799` (or any port Windows
+> isn't using) succeeds immediately. This plan copied `ollama-fwd`'s shape
+> without carrying forward the reason it uses different port numbers on each
+> side (`11435` -> `11434`) — the same constraint applies here, so the
+> container-facing port must differ from the collector's port too. Consumers
+> reach the forwarder at `http://host.docker.internal:18791`. See
+> `.superpowers/sdd/2026-08-02-winevents-bridge/task-5-report.md` for the full
+> investigation.
 
 - [ ] **Step 1: Add the forwarder service**
 
@@ -1203,6 +1218,17 @@ In `docker-compose.yml`, after the `ollama-fwd` service:
   # binds 127.0.0.1, which a bridge-network container cannot reach. This sits in
   # WSL's namespace and republishes it on the docker0 gateway.
   #
+  # External port is 18791, NOT 18790, even though the upstream collector is on
+  # 18790 - same reason ollama-fwd is 11435 -> 11434 rather than 11434 -> 11434.
+  # Under WSL2 mirrored networking, Windows and WSL share one port space: once a
+  # Windows process holds a port number, WSL cannot bind that SAME port number on
+  # ANY address (172.17.0.1 included), even though it's a different IP than the
+  # Windows listener's 127.0.0.1. Verified directly: binding 172.17.0.1:18790
+  # fails with "Address in use" while the collector holds 127.0.0.1:18790 on
+  # Windows; binding 172.17.0.1:18799 (or any port Windows isn't using) succeeds
+  # immediately. So the container-facing port must differ from the collector's
+  # port. Consumers reach this at http://host.docker.internal:18791.
+  #
   # connect-timeout=5 is mandatory - see the ollama-fwd comment. Without it a
   # stopped collector presents to the agent as a multi-minute hang instead of an
   # immediate error.
@@ -1210,7 +1236,7 @@ In `docker-compose.yml`, after the `ollama-fwd` service:
     image: alpine/socat
     container_name: winevents-fwd
     network_mode: host
-    command: TCP-LISTEN:18790,fork,reuseaddr,bind=172.17.0.1 TCP:127.0.0.1:18790,connect-timeout=5
+    command: TCP-LISTEN:18791,fork,reuseaddr,bind=172.17.0.1 TCP:127.0.0.1:18790,connect-timeout=5
     restart: unless-stopped
 ```
 
@@ -1256,7 +1282,7 @@ shell history:
 $tok = (Get-Content "$env:LOCALAPPDATA\OpenClawBrief\winevents.token" -Raw).Trim()
 docker exec openclaw curl -sS -m 10 -o /dev/null `
   -w 'http=%{http_code} total=%{time_total}s\n' `
-  -H "X-Brief-Token: $tok" http://host.docker.internal:18790/health
+  -H "X-Brief-Token: $tok" http://host.docker.internal:18791/health
 ```
 
 Expected: `http=200`.
@@ -1269,10 +1295,20 @@ Get-Process pwsh -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -
 ```
 
 ```bash
-docker exec openclaw curl -sS -m 30 -o /dev/null -w 'total=%{time_total}s\n' http://host.docker.internal:18790/health; echo "exit=$?"
+docker exec openclaw curl -sS -m 30 -o /dev/null -w 'total=%{time_total}s\n' http://host.docker.internal:18791/health; echo "exit=$?"
 ```
 
 Expected: total ~5s, not 30s. This is the regression guard for the failure mode that caused four silent cron failures.
+
+> **Amended after review (Task 5, fix round 1):** `Stop-ScheduledTask` alone
+> does not stop the collector — the launcher's child process is not in a job
+> object, so terminating the launcher does not terminate the collector it
+> spawned. The step above must be preceded by explicitly killing the orphaned
+> process (identify it by command line containing `winevents-collector.ps1`)
+> and confirming nothing listens on `18790` before the timing test means
+> anything. See `task-5-report.md` for the exact sequence used and the
+> confirmation this is a Task 4 launcher defect being tracked separately, not
+> something Task 5 modifies.
 
 Restart it:
 
@@ -1402,7 +1438,7 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 
-const BASE_URL = process.env.WINEVENTS_URL ?? 'http://host.docker.internal:18790';
+const BASE_URL = process.env.WINEVENTS_URL ?? 'http://host.docker.internal:18791';
 const TOKEN = process.env.WINEVENTS_TOKEN ?? '';
 const TIMEOUT_MS = 10_000;
 
@@ -1560,11 +1596,16 @@ docker exec openclaw sh -lc 'test -n "$WINEVENTS_TOKEN" && echo "token present" 
 docker exec openclaw sh -lc 'openclaw mcp add gbrief-winevents \
   --command node \
   --arg /opt/connectors/gbrief-winevents/index.mjs \
-  --env WINEVENTS_URL=http://host.docker.internal:18790 \
+  --env WINEVENTS_URL=http://host.docker.internal:18791 \
   --env WINEVENTS_TOKEN="$WINEVENTS_TOKEN" \
   --include windows_events_digest \
   --timeout 30'
 ```
+
+> **Amended after review (Task 5, fix round 1):** `WINEVENTS_URL` port changed
+> from `18790` to `18791` — that is the `winevents-fwd` container-facing port,
+> not the collector's own port. See the Task 5 amendment above for why the two
+> must differ under WSL2 mirrored networking.
 
 `mcp add` probes before saving, so a failure here means the shim did not start.
 

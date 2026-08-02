@@ -34,6 +34,10 @@ services:
       # /home/node, NOT /root. Named volume rather than a /mnt/c bind mount:
       # keeps config inside the WSL2 filesystem (fast, correct ownership).
       - openclaw-config:/home/node/.openclaw
+      # Connector source, deployed by deploy-connectors.ps1. A named volume
+      # rather than a /mnt/c bind: keeps node_modules on the WSL filesystem with
+      # correct uid-1000 ownership. Git remains the source of truth.
+      - openclaw-connectors:/opt/connectors
     cap_drop:
       - NET_RAW
       - NET_ADMIN
@@ -68,6 +72,31 @@ services:
     command: TCP-LISTEN:11435,fork,reuseaddr,bind=172.17.0.1 TCP:127.0.0.1:11434,connect-timeout=5
     restart: unless-stopped
 
+  # Same namespace-bridging problem as ollama-fwd: the Windows event collector
+  # binds 127.0.0.1, which a bridge-network container cannot reach. This sits in
+  # WSL's namespace and republishes it on the docker0 gateway.
+  #
+  # External port is 18791, NOT 18790, even though the upstream collector is on
+  # 18790 - same reason ollama-fwd is 11435 -> 11434 rather than 11434 -> 11434.
+  # Under WSL2 mirrored networking, Windows and WSL share one port space: once a
+  # Windows process holds a port number, WSL cannot bind that SAME port number on
+  # ANY address (172.17.0.1 included), even though it's a different IP than the
+  # Windows listener's 127.0.0.1. Verified directly: binding 172.17.0.1:18790
+  # fails with "Address in use" while the collector holds 127.0.0.1:18790 on
+  # Windows; binding 172.17.0.1:18799 (or any port Windows isn't using) succeeds
+  # immediately. So the container-facing port must differ from the collector's
+  # port. Consumers reach this at http://host.docker.internal:18791.
+  #
+  # connect-timeout=5 is mandatory - see the ollama-fwd comment. Without it a
+  # stopped collector presents to the agent as a multi-minute hang instead of an
+  # immediate error.
+  winevents-fwd:
+    image: alpine/socat
+    container_name: winevents-fwd
+    network_mode: host
+    command: TCP-LISTEN:18791,fork,reuseaddr,bind=172.17.0.1 TCP:127.0.0.1:18790,connect-timeout=5
+    restart: unless-stopped
+
   # Signal bridge. MODE=json-rpc keeps a persistent signal-cli daemon per account,
   # which is what makes the WebSocket receive endpoint (/v1/receive/<number>) work;
   # MODE=normal spawns a short-lived process per request and cannot stream.
@@ -88,4 +117,5 @@ services:
 
 volumes:
   openclaw-config:
+  openclaw-connectors:
   signal-cli-data:
