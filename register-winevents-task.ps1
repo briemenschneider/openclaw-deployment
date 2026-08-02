@@ -38,13 +38,13 @@
        landing close together) NOT because the collector script is
        idempotent about the port - it is not: winevents-collector.ps1 calls
        HttpListener.Start() with no port pre-check, so a second instance
-       against a live one throws (caught, logged, and exits non-zero as of
-       the fix below, rather than crashing with an unhandled exception, but
-       it is still a failed launch, not a silent no-op). The actual
-       protection against two collectors racing for port 18790 is this
-       task's own MultipleInstances=IgnoreNew setting (set explicitly
-       below) - Task Scheduler will not start a second instance while one
-       is already running, full stop, regardless of how many triggers fire.
+       against a live one throws (caught, logged, and exits non-zero, rather
+       than crashing with an unhandled exception, but it is still a failed
+       launch, not a silent no-op). The actual protection against two
+       collectors racing for port 18790 is this task's own
+       MultipleInstances=IgnoreNew setting (set explicitly below) - Task
+       Scheduler will not start a second instance while one is already
+       running, full stop, regardless of how many triggers fire.
 
   The restart policy below is deliberately generous: the collector can exit
   non-zero on its own (see above), and the whole point of Task Scheduler
@@ -59,30 +59,51 @@ $ErrorActionPreference = 'Stop'
 
 $taskName = 'OpenClaw - winevents collector'
 $script   = Join-Path $PSScriptRoot 'connectors\winevents\winevents-collector.ps1'
-$launcher = Join-Path $PSScriptRoot 'connectors\winevents\invoke-collector.ps1'
 
 if (-not (Test-Path $script)) { throw "collector not found at $script" }
-if (-not (Test-Path $launcher)) { throw "launcher not found at $launcher" }
 
-# Execute is the stable, never-version-pinned Windows PowerShell 5.1
-# binary (a core OS component under System32 - it never moves and is never
-# removed), NOT pwsh.exe directly. pwsh is installed as an MSIX package
-# whose real binary lives in a version-numbered WindowsApps directory (e.g.
-# ...\Microsoft.PowerShell_7.6.4.0_x64__.../pwsh.exe) that disappears on
-# upgrade; baking that path into this task at registration time works
-# until the next pwsh upgrade, then silently reproduces
-# ERROR_FILE_NOT_FOUND with no error until someone notices the brief has no
-# event data. invoke-collector.ps1 resolves pwsh.exe at RUN TIME instead,
-# via the registry "App Paths" key the pwsh installer keeps current across
-# upgrades, then execs the real collector and propagates its exit code.
-# See invoke-collector.ps1's own header for the full rationale, and
-# task-4-report.md for the empirical verification (both of why bare
-# 'pwsh.exe' fails under Task Scheduler, and of this launcher working).
+# Execute is the stable, never-version-pinned Windows PowerShell 5.1 binary
+# (a core OS component under System32 - it never moves and is never
+# removed), running the collector script DIRECTLY. There is no launcher
+# process in between.
+#
+# History: an earlier version of this task ran pwsh.exe (PowerShell 7)
+# directly, but that fails under Task Scheduler - Task Scheduler builds its
+# child process environment from the persisted Machine/User PATH, which
+# resolves a bare 'pwsh.exe' to the 0-byte App Execution Alias stub (a
+# reparse point requiring shell activation, not a real binary), producing
+# ERROR_FILE_NOT_FOUND. A first fix resolved pwsh.exe via $PSHOME at
+# registration time, but that bakes in a version-pinned MSIX install path
+# that goes stale on the next pwsh upgrade. A second fix added a small
+# launcher script (invoke-collector.ps1) that resolved pwsh.exe at RUN TIME
+# via the registry "App Paths" key instead, solving the version-pin problem
+# - but that introduced a NEW bug: the launcher ran the real collector as a
+# child process outside any job object, so a manual Stop-ScheduledTask
+# killed the launcher without killing its child, orphaning the collector
+# still holding port 18790. Normal failure supervision (RestartCount) still
+# worked in that design, because the launcher was synchronous and
+# propagated the collector's own exit code - but a manual stop leaked a
+# process, and a subsequently started instance would then fail to bind the
+# port forever.
+#
+# The fix here removes the launcher entirely: the collector itself runs
+# fine under Windows PowerShell 5.1 (empirically verified - see
+# task-4-report.md fix round 2 for the full test matrix: full Pester suite,
+# live /health and /events exercised and diffed against the pwsh 7 output,
+# the port-in-use and empty-token non-zero exit paths, and the
+# NoMatchingEventsFound error discriminator, all confirmed equivalent
+# between editions). Since 5.1's own path
+# (C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe) is exactly as
+# stable as pwsh's path was unstable, running it directly against the
+# collector keeps the version-pin problem solved AND lets Task Scheduler
+# supervise the real, only process - so Stop-ScheduledTask actually stops
+# the collector, with no orphan and no launcher/job-object machinery
+# needed.
 $stablePwsh51 = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
 if (-not (Test-Path $stablePwsh51)) { throw "Windows PowerShell not found at $stablePwsh51" }
 
 $action = New-ScheduledTaskAction -Execute $stablePwsh51 `
-    -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`" -CollectorScript `"$script`""
+    -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$script`""
 
 # Trigger 1: at logon, 45s in - see .DESCRIPTION above for why 45s.
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME

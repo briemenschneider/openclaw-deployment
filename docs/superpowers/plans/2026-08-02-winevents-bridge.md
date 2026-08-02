@@ -34,8 +34,7 @@
 | `connectors/gbrief-winevents/index.mjs` | Node MCP stdio server. Transport only. |
 | `connectors/gbrief-winevents/index.test.mjs` | Tests against a stub HTTP server. |
 | `connectors/gbrief-winevents/package.json` | Deps + test script. |
-| `register-winevents-task.ps1` | Registers the logon + daily-07:05 scheduled task. |
-| `connectors/winevents/invoke-collector.ps1` | Stable launcher run by Task Scheduler; resolves pwsh.exe at run time and execs the collector, propagating its exit code. |
+| `register-winevents-task.ps1` | Registers the logon + daily-07:05 scheduled task. Runs the collector directly under Windows PowerShell 5.1 - no launcher script. |
 | `deploy-connectors.ps1` | Copies connectors into the container volume, runs npm install. |
 | `docker-compose.yml` | Add `winevents-fwd` service + `openclaw-connectors` volume. |
 
@@ -1045,7 +1044,6 @@ git commit -m "feat(winevents): add loopback HTTP collector with token auth"
 
 **Files:**
 - Create: `register-winevents-task.ps1`
-- Create: `connectors/winevents/invoke-collector.ps1`
 
 **Interfaces:**
 - Produces: scheduled task `OpenClaw - winevents collector`, two triggers
@@ -1083,28 +1081,29 @@ Create `register-winevents-task.ps1`:
   (see winevents-collector.ps1's exit-code contract), and this is the
   supervision that is supposed to bring it back.
 
-  Execute is the stable System32 Windows PowerShell 5.1 binary running
-  invoke-collector.ps1, not pwsh.exe directly - see that script's header
-  for why (pwsh is an MSIX package whose real binary path is version-
-  pinned and changes on upgrade; a bare 'pwsh.exe' also fails under Task
-  Scheduler because it resolves to a non-functional App Execution Alias
-  stub via the persisted PATH).
+  Execute is the stable System32 Windows PowerShell 5.1 binary running the
+  collector script DIRECTLY - no launcher process in between. pwsh.exe
+  (PowerShell 7) is never invoked by this task at all: the collector runs
+  fine under 5.1 (empirically verified - see task-4-report.md fix round 2),
+  and 5.1's own path never moves or gets version-pinned the way pwsh's MSIX
+  install path does. Running it directly (rather than through a launcher
+  that then execs pwsh) also means Task Scheduler supervises the one real
+  process - Stop-ScheduledTask actually stops the collector, with nothing
+  left orphaned holding port 18790.
 #>
 
 $ErrorActionPreference = 'Stop'
 
 $taskName = 'OpenClaw - winevents collector'
 $script   = Join-Path $PSScriptRoot 'connectors\winevents\winevents-collector.ps1'
-$launcher = Join-Path $PSScriptRoot 'connectors\winevents\invoke-collector.ps1'
 
 if (-not (Test-Path $script)) { throw "collector not found at $script" }
-if (-not (Test-Path $launcher)) { throw "launcher not found at $launcher" }
 
 $stablePwsh51 = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
 if (-not (Test-Path $stablePwsh51)) { throw "Windows PowerShell not found at $stablePwsh51" }
 
 $action = New-ScheduledTaskAction -Execute $stablePwsh51 `
-    -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`" -CollectorScript `"$script`""
+    -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$script`""
 
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
 $logonTrigger.Delay = 'PT45S'
@@ -1164,6 +1163,41 @@ Get-ScheduledTask -TaskName $taskName | Select-Object TaskName, State
 > full fix report, including empirical verification that the launcher
 > resolves and execs pwsh correctly under a real Task Scheduler invocation
 > (not just a manual one).
+>
+> **Amended after review (Task 4, fix round 2):** the `invoke-collector.ps1`
+> launcher introduced in fix round 1 (above) is GONE - deleted entirely,
+> along with every reference to it in this doc and in
+> `register-winevents-task.ps1`. It solved the version-pin problem but
+> introduced a second-order bug: the launcher ran the real collector as a
+> child process outside any job object, so `Stop-ScheduledTask` (or
+> anything else that kills the launcher without killing its child) orphaned
+> the collector still holding port 18790 - confirmed independently by
+> Task 5's implementer (see the Task 5 amendment note near
+> "Verify the fail-fast path" below) and reproduced directly during this
+> fix round (`Stop-ScheduledTask` left the task `State: Ready` with the
+> collector still listening on 18790).
+>
+> Rather than fix the launcher (e.g. wrapping the child in a Windows job
+> object with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`), this round tested
+> whether the launcher could be removed entirely: does the collector run
+> correctly under Windows PowerShell 5.1? It does - empirically verified
+> with the full Pester suite (45/45 under both 5.1 and pwsh 7), the
+> collector run standalone under 5.1 and exercised end to end (`/health`,
+> both 401 paths, a real `/events` digest structurally diffed against the
+> pwsh 7 output - identical top-level keys, identical event-object shape,
+> identical ISO-8601 timestamp formatting), the port-in-use and
+> empty-token non-zero exit paths, and the `Get-WinEvent`
+> `NoMatchingEventsFound` `FullyQualifiedErrorId` discriminator (byte-
+> identical string between editions:
+> `NoMatchingEventsFound,Microsoft.PowerShell.Commands.GetWinEventCommand`).
+> Since 5.1 passed, `register-winevents-task.ps1` now runs
+> `C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe` directly
+> against `winevents-collector.ps1` - no launcher, no job object, no
+> version pin (5.1's own path is exactly as stable as pwsh's was
+> unstable), and Task Scheduler supervises the one real process, so
+> `Stop-ScheduledTask` now genuinely stops the collector (re-verified after
+> this fix: task `State` goes to `Ready` AND nothing listens on 18790). See
+> `task-4-report.md` fix round 2 for the full test matrix and evidence.
 
 - [ ] **Step 2: Register and verify**
 
@@ -1180,7 +1214,7 @@ Expected: `{"ok":true,"version":"1"}`
 - [ ] **Step 3: Commit**
 
 ```bash
-git add register-winevents-task.ps1 connectors/winevents/invoke-collector.ps1 connectors/winevents/winevents-collector.ps1 connectors/winevents/winevents-collector.Tests.ps1
+git add register-winevents-task.ps1 connectors/winevents/winevents-collector.ps1 connectors/winevents/winevents-collector.Tests.ps1
 git commit -m "feat(winevents): register collector as unelevated logon+daily task"
 ```
 
@@ -1309,6 +1343,16 @@ Expected: total ~5s, not 30s. This is the regression guard for the failure mode 
 > anything. See `task-5-report.md` for the exact sequence used and the
 > confirmation this is a Task 4 launcher defect being tracked separately, not
 > something Task 5 modifies.
+>
+> **Superseded (Task 4, fix round 2):** the launcher this note describes has
+> been deleted. `register-winevents-task.ps1` now runs
+> `winevents-collector.ps1` directly under Windows PowerShell 5.1, with
+> Task Scheduler supervising that one real process - no launcher, no
+> orphan. The manual-kill workaround above is no longer necessary:
+> `Stop-ScheduledTask` alone now stops the collector (task `State` goes to
+> `Ready` and nothing listens on `18790`), re-verified as part of this fix.
+> See `.superpowers/sdd/2026-08-02-winevents-bridge/task-4-report.md` fix
+> round 2 for the evidence.
 
 Restart it:
 
