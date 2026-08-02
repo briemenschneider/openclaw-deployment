@@ -23,20 +23,45 @@ export function clampHours(h) {
   return Math.min(168, Math.max(1, Math.trunc(n)));
 }
 
+function payloadTypeOf(body) {
+  if (body === null) return 'null';
+  if (Array.isArray(body)) return 'array';
+  return typeof body;
+}
+
 export async function fetchDigest(baseUrl, token, hours, fetchImpl = fetch) {
   const url = `${baseUrl}/events?hours=${clampHours(hours)}`;
+
+  let res;
   try {
-    const res = await fetchImpl(url, {
+    res = await fetchImpl(url, {
       headers: { 'X-Brief-Token': token },
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
-    if (!res.ok) {
-      return { ok: false, error: `collector returned HTTP ${res.status}` };
-    }
-    return await res.json();
   } catch (err) {
+    if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+      return { ok: false, error: `collector timed out after ${TIMEOUT_MS / 1000}s` };
+    }
     return { ok: false, error: `collector unreachable: ${err.message}` };
   }
+
+  if (!res.ok) {
+    return { ok: false, error: `collector returned HTTP ${res.status}` };
+  }
+
+  let body;
+  try {
+    body = await res.json();
+  } catch (err) {
+    return { ok: false, error: `collector returned a malformed response: ${err.message}` };
+  }
+
+  const type = payloadTypeOf(body);
+  if (type !== 'object') {
+    return { ok: false, error: `collector returned an unexpected payload type: ${type}` };
+  }
+
+  return body;
 }
 
 const server = new Server(
