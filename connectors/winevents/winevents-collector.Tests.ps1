@@ -83,3 +83,38 @@ Describe 'Test-TokenEqual' {
         Test-TokenEqual -A 'abc123' -B $null | Should -BeFalse
     }
 }
+
+Describe 'Start-WinEventsCollector exit code contract' {
+    # These two paths both throw before the listener is ever created (the
+    # token file is validated first), so they are testable in-process
+    # without binding a socket. Start-WinEventsCollector returns an int
+    # exit code rather than calling `exit` itself for exactly this reason -
+    # see the function's .DESCRIPTION. The listener.Start()-fails
+    # (port-in-use) path and the give-up-after-N-GetContext-failures path
+    # both require a real listener/socket and are demonstrated live instead
+    # (see task-4-report.md), not unit tested here.
+
+    It 'returns exit code 1 when the token file does not exist' {
+        $logPath = Join-Path $TestDrive 'missing-token.log'
+        $code = Start-WinEventsCollector -Port 0 -TokenPath (Join-Path $TestDrive 'no-such-token') -LogPath $logPath
+        $code | Should -Be 1
+        (Get-Content $logPath -Raw) | Should -Match 'FATAL: token file not found'
+    }
+
+    It 'returns exit code 1 when the token file is empty' {
+        $logPath = Join-Path $TestDrive 'empty-token.log'
+        $tokenPath = Join-Path $TestDrive 'empty-token'
+        Set-Content -Path $tokenPath -Value '' -NoNewline
+        $code = Start-WinEventsCollector -Port 0 -TokenPath $tokenPath -LogPath $logPath
+        $code | Should -Be 1
+        (Get-Content $logPath -Raw) | Should -Match 'FATAL: token file is empty'
+    }
+
+    It 'returns exit code 1 when the token file is whitespace only' {
+        $logPath = Join-Path $TestDrive 'whitespace-token.log'
+        $tokenPath = Join-Path $TestDrive 'whitespace-token'
+        Set-Content -Path $tokenPath -Value "   `t  " -NoNewline
+        $code = Start-WinEventsCollector -Port 0 -TokenPath $tokenPath -LogPath $logPath
+        $code | Should -Be 1
+    }
+}

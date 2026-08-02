@@ -80,7 +80,29 @@ function Start-WinEventsCollector {
       Start the loopback listener and serve requests until stopped.
     .DESCRIPTION
       Split out from script top level so the script can be dot-sourced for
-      testing (e.g. New-ErrorJson) without binding a socket.
+      testing (e.g. New-ErrorJson, or the exit-code contract below) without
+      binding a socket in the cases that do not require one.
+
+      Exit-code contract (read by Task Scheduler's RestartCount supervision -
+      see register-winevents-task.ps1): this function RETURNS an int exit
+      code rather than calling `exit` itself, so it stays callable from
+      Pester without killing the test process; the script's own top-level
+      invocation (bottom of this file) is what actually calls `exit` with
+      that value when run as a real process.
+
+        0   = deliberate/clean shutdown - GetContext() observed the listener
+              is no longer listening (Stop()/Close() called from elsewhere).
+              This is the "nothing is wrong" case.
+        1   = abnormal termination - token file missing/empty, the listener
+              failed to Start() (e.g. port already in use), or the
+              give-up-after-N-consecutive-GetContext-failures path. Task
+              Scheduler must see this as a failure so RestartCount kicks in.
+
+      This distinction matters because a pwsh script that reaches the end of
+      its execution with no explicit exit code returns 0 regardless of what
+      happened inside - a `break` out of the request loop is not, by itself,
+      a signal of anything. Every abnormal path below sets $exitCode before
+      falling through to the shared cleanup and return.
     #>
     param(
         [int]$Port,
@@ -95,27 +117,56 @@ function Start-WinEventsCollector {
 
     New-Item -ItemType Directory -Force -Path (Split-Path $LogPath) | Out-Null
 
-    if (-not (Test-Path $TokenPath)) { throw "token file not found at $TokenPath" }
-    $expectedToken = (Get-Content $TokenPath -Raw).Trim()
-    if ([string]::IsNullOrWhiteSpace($expectedToken)) { throw "token file is empty" }
-
-    $listener = [System.Net.HttpListener]::new()
-    $listener.Prefixes.Add("http://127.0.0.1:$Port/")
-    $listener.Start()
-    Write-Log "listening on 127.0.0.1:$Port"
-
-    # This runs unattended as a logon scheduled task, reached through a socat
-    # forwarder from a container. Client disconnects (forwarder restarts,
-    # curl -m timeouts, container churn) are routine, not exceptional, and
-    # must never take the listener down. Consecutive-failure counter guards
-    # against a hot spin if GetContext starts failing repeatedly for a reason
-    # that is not a client hangup (e.g. a transport-level problem) - a short
-    # sleep backs off between retries, and after a threshold we give up and
-    # log why rather than burn CPU forever.
-    $consecutiveFailures = 0
-    $maxConsecutiveFailures = 10
+    $exitCode = 0
+    $listener = $null
 
     try {
+        if (-not (Test-Path $TokenPath)) { throw "token file not found at $TokenPath" }
+        # Get-Content -Raw returns $null (not '') for a genuinely zero-byte
+        # file, which would otherwise throw a confusing null-reference error
+        # from .Trim() instead of the intended "token file is empty" message.
+        $rawToken = Get-Content $TokenPath -Raw
+        if ($null -eq $rawToken) { $rawToken = '' }
+        $expectedToken = $rawToken.Trim()
+        if ([string]::IsNullOrWhiteSpace($expectedToken)) { throw "token file is empty" }
+
+        $listener = [System.Net.HttpListener]::new()
+        $listener.Prefixes.Add("http://127.0.0.1:$Port/")
+
+        try {
+            $listener.Start()
+        }
+        catch {
+            # The real protection against two collectors racing for this
+            # port is Task Scheduler's MultipleInstances=IgnoreNew (set
+            # explicitly in register-winevents-task.ps1) - this script does
+            # not pre-check the port and is not itself idempotent. This
+            # catch exists for the case that protection does not apply,
+            # e.g. an unrelated process (or a manually-started second copy
+            # outside Task Scheduler's control) already holds the port. Fail
+            # loudly with a clear log line and a non-zero exit rather than
+            # letting an unhandled HttpListenerException propagate.
+            Write-Log "FAILED to start listener - port $Port already in use or otherwise unavailable: $($_.Exception.Message)"
+            throw
+        }
+
+        Write-Log "listening on 127.0.0.1:$Port"
+
+        # This runs unattended as a logon scheduled task, reached through a
+        # socat forwarder from a container. Client disconnects (forwarder
+        # restarts, curl -m timeouts, container churn) are routine, not
+        # exceptional, and must never take the listener down.
+        # Consecutive-failure counter guards against a hot spin if
+        # GetContext starts failing repeatedly for a reason that is not a
+        # client hangup (e.g. a transport-level problem) - a short sleep
+        # backs off between retries, and after a threshold we give up and
+        # log why rather than burn CPU forever. Giving up here is an
+        # abnormal exit (sets $exitCode = 1, see the contract above) -
+        # Task Scheduler's restart supervision is what is supposed to bring
+        # the collector back, not a silent "logged it and moved on".
+        $consecutiveFailures = 0
+        $maxConsecutiveFailures = 10
+
         while ($listener.IsListening) {
             $ctx = $null
             try {
@@ -126,12 +177,14 @@ function Start-WinEventsCollector {
                 # Deliberate shutdown (Stop()/Close() called from elsewhere,
                 # or GetContext invoked after disposal) - exit the loop
                 # cleanly instead of treating it as a transient error.
+                # $exitCode stays 0: this is the "nothing is wrong" path.
                 if (-not $listener.IsListening) { break }
 
                 $consecutiveFailures++
                 Write-Log "GetContext error ($consecutiveFailures/$maxConsecutiveFailures): $($_.Exception.Message)"
                 if ($consecutiveFailures -ge $maxConsecutiveFailures) {
                     Write-Log "too many consecutive GetContext failures, giving up"
+                    $exitCode = 1
                     break
                 }
                 Start-Sleep -Milliseconds 200
@@ -194,16 +247,28 @@ function Start-WinEventsCollector {
             }
         }
     }
-    finally {
-        $listener.Stop()
-        $listener.Close()
-        Write-Log "stopped"
+    catch {
+        # Covers: token file missing/empty, listener.Start() failure
+        # (rethrown from the nested catch above), or any other unexpected
+        # error. All of these are abnormal - Task Scheduler must see a
+        # non-zero exit so RestartCount supervision applies.
+        Write-Log "FATAL: $($_.Exception.Message)"
+        $exitCode = 1
     }
+    finally {
+        if ($listener) {
+            try { if ($listener.IsListening) { $listener.Stop() } } catch { }
+            try { $listener.Close() } catch { }
+        }
+        Write-Log "stopped (exit code $exitCode)"
+    }
+
+    return $exitCode
 }
 
 # Only start the listener when the script is invoked directly (run as a file,
 # or via "pwsh -File"), not when it is dot-sourced to load functions for
 # testing. When dot-sourced, $MyInvocation.InvocationName is ".".
 if ($MyInvocation.InvocationName -ne '.') {
-    Start-WinEventsCollector -Port $Port -TokenPath $TokenPath -LogPath $LogPath
+    exit (Start-WinEventsCollector -Port $Port -TokenPath $TokenPath -LogPath $LogPath)
 }

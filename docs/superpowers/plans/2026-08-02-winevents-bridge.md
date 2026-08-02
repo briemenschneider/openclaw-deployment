@@ -34,7 +34,8 @@
 | `connectors/gbrief-winevents/index.mjs` | Node MCP stdio server. Transport only. |
 | `connectors/gbrief-winevents/index.test.mjs` | Tests against a stub HTTP server. |
 | `connectors/gbrief-winevents/package.json` | Deps + test script. |
-| `register-winevents-task.ps1` | Registers the logon scheduled task. |
+| `register-winevents-task.ps1` | Registers the logon + daily-07:05 scheduled task. |
+| `connectors/winevents/invoke-collector.ps1` | Stable launcher run by Task Scheduler; resolves pwsh.exe at run time and execs the collector, propagating its exit code. |
 | `deploy-connectors.ps1` | Copies connectors into the container volume, runs npm install. |
 | `docker-compose.yml` | Add `winevents-fwd` service + `openclaw-connectors` volume. |
 
@@ -773,7 +774,29 @@ function Start-WinEventsCollector {
       Start the loopback listener and serve requests until stopped.
     .DESCRIPTION
       Split out from script top level so the script can be dot-sourced for
-      testing (e.g. New-ErrorJson) without binding a socket.
+      testing (e.g. New-ErrorJson, or the exit-code contract below) without
+      binding a socket in the cases that do not require one.
+
+      Exit-code contract (read by Task Scheduler's RestartCount supervision -
+      see register-winevents-task.ps1): this function RETURNS an int exit
+      code rather than calling `exit` itself, so it stays callable from
+      Pester without killing the test process; the script's own top-level
+      invocation (bottom of this file) is what actually calls `exit` with
+      that value when run as a real process.
+
+        0   = deliberate/clean shutdown - GetContext() observed the listener
+              is no longer listening (Stop()/Close() called from elsewhere).
+              This is the "nothing is wrong" case.
+        1   = abnormal termination - token file missing/empty, the listener
+              failed to Start() (e.g. port already in use), or the
+              give-up-after-N-consecutive-GetContext-failures path. Task
+              Scheduler must see this as a failure so RestartCount kicks in.
+
+      This distinction matters because a pwsh script that reaches the end of
+      its execution with no explicit exit code returns 0 regardless of what
+      happened inside - a `break` out of the request loop is not, by itself,
+      a signal of anything. Every abnormal path below sets $exitCode before
+      falling through to the shared cleanup and return.
     #>
     param(
         [int]$Port,
@@ -788,27 +811,56 @@ function Start-WinEventsCollector {
 
     New-Item -ItemType Directory -Force -Path (Split-Path $LogPath) | Out-Null
 
-    if (-not (Test-Path $TokenPath)) { throw "token file not found at $TokenPath" }
-    $expectedToken = (Get-Content $TokenPath -Raw).Trim()
-    if ([string]::IsNullOrWhiteSpace($expectedToken)) { throw "token file is empty" }
-
-    $listener = [System.Net.HttpListener]::new()
-    $listener.Prefixes.Add("http://127.0.0.1:$Port/")
-    $listener.Start()
-    Write-Log "listening on 127.0.0.1:$Port"
-
-    # This runs unattended as a logon scheduled task, reached through a socat
-    # forwarder from a container. Client disconnects (forwarder restarts,
-    # curl -m timeouts, container churn) are routine, not exceptional, and
-    # must never take the listener down. Consecutive-failure counter guards
-    # against a hot spin if GetContext starts failing repeatedly for a reason
-    # that is not a client hangup (e.g. a transport-level problem) - a short
-    # sleep backs off between retries, and after a threshold we give up and
-    # log why rather than burn CPU forever.
-    $consecutiveFailures = 0
-    $maxConsecutiveFailures = 10
+    $exitCode = 0
+    $listener = $null
 
     try {
+        if (-not (Test-Path $TokenPath)) { throw "token file not found at $TokenPath" }
+        # Get-Content -Raw returns $null (not '') for a genuinely zero-byte
+        # file, which would otherwise throw a confusing null-reference error
+        # from .Trim() instead of the intended "token file is empty" message.
+        $rawToken = Get-Content $TokenPath -Raw
+        if ($null -eq $rawToken) { $rawToken = '' }
+        $expectedToken = $rawToken.Trim()
+        if ([string]::IsNullOrWhiteSpace($expectedToken)) { throw "token file is empty" }
+
+        $listener = [System.Net.HttpListener]::new()
+        $listener.Prefixes.Add("http://127.0.0.1:$Port/")
+
+        try {
+            $listener.Start()
+        }
+        catch {
+            # The real protection against two collectors racing for this
+            # port is Task Scheduler's MultipleInstances=IgnoreNew (set
+            # explicitly in register-winevents-task.ps1) - this script does
+            # not pre-check the port and is not itself idempotent. This
+            # catch exists for the case that protection does not apply,
+            # e.g. an unrelated process (or a manually-started second copy
+            # outside Task Scheduler's control) already holds the port. Fail
+            # loudly with a clear log line and a non-zero exit rather than
+            # letting an unhandled HttpListenerException propagate.
+            Write-Log "FAILED to start listener - port $Port already in use or otherwise unavailable: $($_.Exception.Message)"
+            throw
+        }
+
+        Write-Log "listening on 127.0.0.1:$Port"
+
+        # This runs unattended as a logon scheduled task, reached through a
+        # socat forwarder from a container. Client disconnects (forwarder
+        # restarts, curl -m timeouts, container churn) are routine, not
+        # exceptional, and must never take the listener down.
+        # Consecutive-failure counter guards against a hot spin if
+        # GetContext starts failing repeatedly for a reason that is not a
+        # client hangup (e.g. a transport-level problem) - a short sleep
+        # backs off between retries, and after a threshold we give up and
+        # log why rather than burn CPU forever. Giving up here is an
+        # abnormal exit (sets $exitCode = 1, see the contract above) -
+        # Task Scheduler's restart supervision is what is supposed to bring
+        # the collector back, not a silent "logged it and moved on".
+        $consecutiveFailures = 0
+        $maxConsecutiveFailures = 10
+
         while ($listener.IsListening) {
             $ctx = $null
             try {
@@ -819,12 +871,14 @@ function Start-WinEventsCollector {
                 # Deliberate shutdown (Stop()/Close() called from elsewhere,
                 # or GetContext invoked after disposal) - exit the loop
                 # cleanly instead of treating it as a transient error.
+                # $exitCode stays 0: this is the "nothing is wrong" path.
                 if (-not $listener.IsListening) { break }
 
                 $consecutiveFailures++
                 Write-Log "GetContext error ($consecutiveFailures/$maxConsecutiveFailures): $($_.Exception.Message)"
                 if ($consecutiveFailures -ge $maxConsecutiveFailures) {
                     Write-Log "too many consecutive GetContext failures, giving up"
+                    $exitCode = 1
                     break
                 }
                 Start-Sleep -Milliseconds 200
@@ -887,18 +941,30 @@ function Start-WinEventsCollector {
             }
         }
     }
-    finally {
-        $listener.Stop()
-        $listener.Close()
-        Write-Log "stopped"
+    catch {
+        # Covers: token file missing/empty, listener.Start() failure
+        # (rethrown from the nested catch above), or any other unexpected
+        # error. All of these are abnormal - Task Scheduler must see a
+        # non-zero exit so RestartCount supervision applies.
+        Write-Log "FATAL: $($_.Exception.Message)"
+        $exitCode = 1
     }
+    finally {
+        if ($listener) {
+            try { if ($listener.IsListening) { $listener.Stop() } } catch { }
+            try { $listener.Close() } catch { }
+        }
+        Write-Log "stopped (exit code $exitCode)"
+    }
+
+    return $exitCode
 }
 
 # Only start the listener when the script is invoked directly (run as a file,
 # or via "pwsh -File"), not when it is dot-sourced to load functions for
 # testing. When dot-sourced, $MyInvocation.InvocationName is ".".
 if ($MyInvocation.InvocationName -ne '.') {
-    Start-WinEventsCollector -Port $Port -TokenPath $TokenPath -LogPath $LogPath
+    exit (Start-WinEventsCollector -Port $Port -TokenPath $TokenPath -LogPath $LogPath)
 }
 ```
 
@@ -918,6 +984,29 @@ if ($MyInvocation.InvocationName -ne '.') {
 > rather than "crash the listener." See
 > `.superpowers/sdd/2026-08-02-winevents-bridge/task-3-report.md` for the
 > full fix report and verification evidence.
+>
+> **Amended after review (Task 4, fix round 1):** the code block above also
+> reflects a second fix, made while implementing Task 4's registration
+> script. The give-up-after-10-consecutive-GetContext-failures path used to
+> `break` with no explicit exit code, so it fell off the end of the script
+> and returned 0 - indistinguishable from a clean shutdown to Task
+> Scheduler's RestartCount supervision, which only restarts on a non-zero
+> result. That silently defeated the entire point of Task 4's restart
+> policy for exactly the failure it exists to cover. Fixed by giving
+> `Start-WinEventsCollector` an explicit exit-code contract (0 = deliberate
+> shutdown, 1 = abnormal termination), documented in the function's
+> `.DESCRIPTION` above, and returning that value instead of calling `exit`
+> directly (so the function stays callable from Pester without killing the
+> test process - the real `exit` call moved to the script's top-level
+> invocation). The same pass also made `$listener.Start()` fail gracefully
+> (logged, non-zero exit) instead of throwing an unhandled
+> `HttpListenerException` on a port collision, and fixed a pre-existing bug
+> where `Get-Content -Raw` on a genuinely zero-byte token file returns
+> `$null`, which crashed `.Trim()` with a confusing null-reference error
+> instead of the intended "token file is empty" message. See
+> `.superpowers/sdd/2026-08-02-winevents-bridge/task-4-report.md` for the
+> full fix report, live exit-code demonstrations, and verification
+> evidence.
 
 - [ ] **Step 4: Verify by hand**
 
@@ -956,9 +1045,11 @@ git commit -m "feat(winevents): add loopback HTTP collector with token auth"
 
 **Files:**
 - Create: `register-winevents-task.ps1`
+- Create: `connectors/winevents/invoke-collector.ps1`
 
 **Interfaces:**
-- Produces: scheduled task `OpenClaw - winevents collector`, 45s logon delay, unelevated, no window.
+- Produces: scheduled task `OpenClaw - winevents collector`, two triggers
+  (logon with 45s delay, and daily at 07:05 local), unelevated, no window.
 
 The 45s delay is deliberately longer than the Ollama task's 30s: the collector is not on the critical path for 07:15 and should not compete with model loading during the boot storm.
 
@@ -976,28 +1067,58 @@ Create `register-winevents-task.ps1`:
   collector only needs Event Log Readers group membership to reach the Security
   channel, and an always-on elevated process feeding an LLM is a far larger
   blast radius than a read-only reporting job justifies.
+
+  Two triggers are registered on the same task: at logon (45s delay), and
+  daily at 07:05 local time as a safety net so a collector that died
+  earlier is back up ten minutes before the 07:15 morning brief cron, even
+  if the machine was never logged out overnight.
+
+  MultipleInstances=IgnoreNew is set explicitly - it is what actually
+  prevents two collectors racing for port 18790 when triggers land close
+  together, not any idempotency in the collector script itself (it has
+  none; a second HttpListener.Start() against a held port throws).
+
+  RestartCount=1440 (1/minute for 24h) is deliberately generous: the
+  collector can exit non-zero on its own after sustained transport failure
+  (see winevents-collector.ps1's exit-code contract), and this is the
+  supervision that is supposed to bring it back.
+
+  Execute is the stable System32 Windows PowerShell 5.1 binary running
+  invoke-collector.ps1, not pwsh.exe directly - see that script's header
+  for why (pwsh is an MSIX package whose real binary path is version-
+  pinned and changes on upgrade; a bare 'pwsh.exe' also fails under Task
+  Scheduler because it resolves to a non-functional App Execution Alias
+  stub via the persisted PATH).
 #>
 
 $ErrorActionPreference = 'Stop'
 
 $taskName = 'OpenClaw - winevents collector'
 $script   = Join-Path $PSScriptRoot 'connectors\winevents\winevents-collector.ps1'
+$launcher = Join-Path $PSScriptRoot 'connectors\winevents\invoke-collector.ps1'
 
 if (-not (Test-Path $script)) { throw "collector not found at $script" }
+if (-not (Test-Path $launcher)) { throw "launcher not found at $launcher" }
 
-$action = New-ScheduledTaskAction -Execute 'pwsh.exe' `
-    -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$script`""
+$stablePwsh51 = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+if (-not (Test-Path $stablePwsh51)) { throw "Windows PowerShell not found at $stablePwsh51" }
 
-$trigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
-$trigger.Delay = 'PT45S'
+$action = New-ScheduledTaskAction -Execute $stablePwsh51 `
+    -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$launcher`" -CollectorScript `"$script`""
+
+$logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME
+$logonTrigger.Delay = 'PT45S'
+
+$dailyTrigger = New-ScheduledTaskTrigger -Daily -At '07:05'
 
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-    -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+    -StartWhenAvailable -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 1440 `
+    -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew
 
 $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
     -LogonType Interactive -RunLevel Limited
 
-Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
+Register-ScheduledTask -TaskName $taskName -Action $action -Trigger @($logonTrigger, $dailyTrigger) `
     -Settings $settings -Principal $principal `
     -Description 'Serves filtered Windows event digests on 127.0.0.1:18790 for the OpenClaw morning brief. Unelevated by design.' `
     -Force | Out-Null
@@ -1005,7 +1126,44 @@ Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
 Get-ScheduledTask -TaskName $taskName | Select-Object TaskName, State
 ```
 
-`ExecutionTimeLimit` is `[TimeSpan]::Zero` (unlimited) because this is a long-running listener, not a one-shot — the Ollama task's 5-minute limit would kill it mid-service.
+`ExecutionTimeLimit` is `[TimeSpan]::Zero` (unlimited) because this is a long-running listener, not a one-shot - the Ollama task's 5-minute limit would kill it mid-service.
+
+> **Amended after review (Task 4, fix round 1):** the code block above
+> reflects the shipped script, not the original plan draft (reproduced
+> below the amendment note in `task-4-report.md`'s history for reference).
+> Three defects surfaced in review:
+>
+> 1. `RestartCount 3` with a 1-minute interval only buys 3 minutes of
+>    retrying before Task Scheduler gives up - nowhere near enough for a
+>    collector that must reliably be up daily at 07:15. Raised to 1440
+>    (1/minute for 24h, covering the gap until the next daily/logon trigger
+>    anyway).
+> 2. The task had only a logon trigger, so a collector that died while the
+>    user stayed logged in for days would stay dead until the next logon -
+>    potentially never reaching the 07:15 morning brief. Added a daily
+>    07:05 local trigger as a safety net.
+> 3. `-Execute 'pwsh.exe'` fails under Task Scheduler on this machine:
+>    Task Scheduler builds its child process environment from the
+>    persisted Machine/User `PATH`, which resolves a bare `pwsh.exe` to the
+>    0-byte App Execution Alias stub (a reparse point requiring shell
+>    activation, not a real binary), producing `ERROR_FILE_NOT_FOUND`. A
+>    first fix resolved `pwsh.exe` via `$PSHOME` at registration time, but
+>    that bakes in a version-pinned MSIX path that goes stale on the next
+>    pwsh upgrade. The shipped fix instead adds `invoke-collector.ps1`, a
+>    small launcher run by the never-version-pinned System32 Windows
+>    PowerShell 5.1 binary, which resolves pwsh.exe at RUN TIME via the
+>    registry "App Paths" key the pwsh installer keeps current across
+>    upgrades, execs the collector, and propagates its exit code.
+>
+> Also fixed: the daily trigger's rationale no longer claims the collector
+> is "idempotent" about the port (it is not - see the winevents-collector.ps1
+> amendment note above); the real protection against two racing instances
+> is this task's explicit `MultipleInstances IgnoreNew`, called out above
+> rather than left as New-ScheduledTaskSettingsSet's unstated default. See
+> `.superpowers/sdd/2026-08-02-winevents-bridge/task-4-report.md` for the
+> full fix report, including empirical verification that the launcher
+> resolves and execs pwsh correctly under a real Task Scheduler invocation
+> (not just a manual one).
 
 - [ ] **Step 2: Register and verify**
 
@@ -1022,8 +1180,8 @@ Expected: `{"ok":true,"version":"1"}`
 - [ ] **Step 3: Commit**
 
 ```bash
-git add register-winevents-task.ps1
-git commit -m "feat(winevents): register collector as unelevated logon task"
+git add register-winevents-task.ps1 connectors/winevents/invoke-collector.ps1 connectors/winevents/winevents-collector.ps1 connectors/winevents/winevents-collector.Tests.ps1
+git commit -m "feat(winevents): register collector as unelevated logon+daily task"
 ```
 
 ---
