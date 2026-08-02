@@ -76,15 +76,34 @@ calls". That was wrong about the cause. Investigated 2026-08-02:
 - Fixed by declaring `compat: { supportsTools: true, thinkingFormat: "qwen" }` and
   switching to the native `api: "ollama"` adapter (baseUrl drops `/v1`). The hard
   failures are gone; plain generation verified working.
-- **A real model limit remains.** With OpenClaw's full agent context (~45 tools),
-  `qwen3.5:9b` still does not emit a genuine call — it confabulates, claiming to
-  have invoked the tool and inventing plausible-looking events. With a single tool
-  and a short prompt it is flawless. Tool *selection* at scale, not tool calling,
-  is what it cannot do.
+- **The remaining blocker was context bulk, not tool count.** Reducing the tool set
+  from ~45 to ~2 did *not* help; both the 9B and the 27B still made no call. A wire
+  capture proved OpenClaw *was* sending the tools correctly (`POST /api/chat` with a
+  well-formed `tools` array), and the same request replayed by hand with a
+  one-sentence prompt produced a perfect `tool_calls` response. The only difference
+  was prompt size: OpenClaw's default agent request is **~52 KB** of bootstrap
+  files, skills, and identity context, and the 9B loses the tool-calling thread
+  under it.
 
-So the 07:15 brief still will not produce real event data on the 9B, and the 27B is
-untested since the fix. `claude_tasks` (haiku-4.5) and `coding_agent` (sonnet-5)
-call tools reliably and remain the dependable route.
+**Local tool calling now works.** With the provider fixed and the agent's context
+trimmed, `qwen3.5:9b` calls the tool reliably against real data:
+
+```
+tools: { profile: "minimal", alsoAllow: ["gbrief-winevents__windows_events_digest"] }
+contextInjection: "never"
+skills: []
+bootstrapTotalMaxChars: 1000
+
+-> toolSummary: [{ calls: 1, tools: ["gbrief-winevents__windows_events_digest"], failures: 0 }]
+```
+
+**The trade-off is real and worth stating.** An agent configured this way has no
+bootstrap files, no skills, and no injected identity — it is a narrow specialist,
+not a general assistant. That suits the morning brief, which does one job. It would
+not suit `main`. The 27B is still untested under trimmed context.
+
+`claude_tasks` (haiku-4.5) and `coding_agent` (sonnet-5) call tools reliably with
+full context and remain the zero-tuning option.
 
 **A capable model and the injection mitigations must land together, never
 model-first.** The digest ships full Windows event message text to the model. Event
