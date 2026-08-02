@@ -37,6 +37,13 @@ Describe 'Select-BriefEvent' {
             $r = @(Select-BriefEvent -Events @($e) -Now $script:Now -WindowHours 24)
             $r.Count | Should -Be 0
         }
+
+        It 'keeps an event at the exact window cutoff' {
+            $cutoff = $script:Now.AddHours(-24)
+            $e = New-TestEvent -TimeCreated $cutoff
+            $r = @(Select-BriefEvent -Events @($e) -Now $script:Now -WindowHours 24)
+            $r.Count | Should -Be 1
+        }
     }
 
     Context 'level policy' {
@@ -102,6 +109,32 @@ Describe 'Select-BriefEvent' {
             $allow = @([pscustomobject]@{ provider = 'NoisyDriver'; id = 999 })
             $r = @(Select-BriefEvent -Events @($e) -Now $script:Now -Allowlist $allow)
             $r.Count | Should -Be 1
+        }
+
+        It 'suppresses with a JSON string id normalized to int' {
+            $e = New-TestEvent -ProviderName 'NoisyDriver' -Id 999
+            $allow = @([pscustomobject]@{ provider = 'NoisyDriver'; id = '999' })
+            $r = @(Select-BriefEvent -Events @($e) -Now $script:Now -Allowlist $allow)
+            $r.Count | Should -Be 0
+        }
+
+        It 'tolerates fully malformed allowlist without throwing' {
+            $e = New-TestEvent -ProviderName 'disk' -Id 51
+            $malformed = @(
+                [pscustomobject]@{ provider = 'OtherDriver'; id = 'not_numeric' },
+                'bare string',
+                [pscustomobject]@{ missingId = 'value' },
+                $null
+            )
+            $didThrow = $false
+            $result = $null
+            try {
+                $result = @(Select-BriefEvent -Events @($e) -Now $script:Now -Allowlist $malformed)
+            } catch {
+                $didThrow = $true
+            }
+            $didThrow | Should -Be $false
+            $result.Count | Should -Be 1
         }
     }
 
@@ -173,6 +206,74 @@ Describe 'Get-NormalizedEvent' {
     }
 }
 
+Describe 'Select-ValidAllowlistEntry' {
+    It 'accepts a valid entry with string provider and int id' {
+        $raw = @([pscustomobject]@{ provider = 'disk'; id = 51 })
+        $result = Select-ValidAllowlistEntry -Raw $raw
+        $result.Valid.Count      | Should -Be 1
+        $result.Valid[0].provider | Should -Be 'disk'
+        $result.Valid[0].id       | Should -Be 51
+        $result.Errors.Count      | Should -Be 0
+    }
+
+    It 'rejects an entry with non-numeric id' {
+        $raw = @([pscustomobject]@{ provider = 'disk'; id = 'not_numeric' })
+        $result = Select-ValidAllowlistEntry -Raw $raw
+        $result.Valid.Count  | Should -Be 0
+        $result.Errors.Count | Should -Be 1
+        $result.Errors[0].reason | Should -Match 'not numeric'
+    }
+
+    It 'rejects an entry missing the id key' {
+        $raw = @([pscustomobject]@{ provider = 'disk' })
+        $result = Select-ValidAllowlistEntry -Raw $raw
+        $result.Valid.Count  | Should -Be 0
+        $result.Errors.Count | Should -Be 1
+        $result.Errors[0].reason | Should -Match 'missing id'
+    }
+
+    It 'rejects an entry missing the provider key' {
+        $raw = @([pscustomobject]@{ id = 51 })
+        $result = Select-ValidAllowlistEntry -Raw $raw
+        $result.Valid.Count  | Should -Be 0
+        $result.Errors.Count | Should -Be 1
+        $result.Errors[0].reason | Should -Match 'missing provider'
+    }
+
+    It 'rejects a bare string in the array' {
+        $raw = @('bare string')
+        $result = Select-ValidAllowlistEntry -Raw $raw
+        $result.Valid.Count  | Should -Be 0
+        $result.Errors.Count | Should -Be 1
+    }
+
+    It 'normalizes a JSON string id to int' {
+        $raw = @([pscustomobject]@{ provider = 'disk'; id = '999' })
+        $result = Select-ValidAllowlistEntry -Raw $raw
+        $result.Valid.Count      | Should -Be 1
+        $result.Valid[0].id       | Should -Be 999
+        $result.Valid[0].id       | Should -BeOfType 'int'
+        $result.Errors.Count      | Should -Be 0
+    }
+
+    It 'handles an empty array gracefully' {
+        $result = Select-ValidAllowlistEntry -Raw @()
+        $result.Valid.Count  | Should -Be 0
+        $result.Errors.Count | Should -Be 0
+    }
+
+    It 'mixes valid and invalid entries, reporting both' {
+        $raw = @(
+            [pscustomobject]@{ provider = 'good'; id = 51 },
+            [pscustomobject]@{ provider = 'bad'; id = 'notnum' },
+            [pscustomobject]@{ id = 99 }
+        )
+        $result = Select-ValidAllowlistEntry -Raw $raw
+        $result.Valid.Count  | Should -Be 1
+        $result.Errors.Count | Should -Be 2
+    }
+}
+
 Describe 'Get-BriefDigest' {
     It 'reports the channels it could read against a live machine' {
         $d = Get-BriefDigest -WindowHours 24
@@ -182,6 +283,7 @@ Describe 'Get-BriefDigest' {
         $d.generatedAt          | Should -Match 'Z$'
         $d.PSObject.Properties.Name | Should -Contain 'channelsUnavailable'
         $d.PSObject.Properties.Name | Should -Contain 'events'
+        $d.PSObject.Properties.Name | Should -Contain 'allowlistErrors'
     }
 
     It 'records Security under channelsUnavailable when it cannot be read' {
@@ -190,5 +292,13 @@ Describe 'Get-BriefDigest' {
         $secListedUnavailable = @($d.channelsUnavailable | Where-Object { $_.channel -eq 'Security' }).Count -gt 0
         # Exactly one must be true - Security is never silently absent.
         ($secReadable -bxor $secListedUnavailable) | Should -BeTrue
+    }
+
+    It 'handles suppress that is not an array' {
+        # Create a temporary allowlist with suppress as a single object
+        $tmpFile = [System.IO.Path]::GetTempFileName()
+        @{ suppress = [pscustomobject]@{ provider = 'test'; id = 123 } } | ConvertTo-Json | Set-Content $tmpFile
+        { $d = Get-BriefDigest -AllowlistPath $tmpFile } | Should -Not -Throw
+        Remove-Item $tmpFile -Force
     }
 }

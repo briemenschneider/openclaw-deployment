@@ -30,6 +30,91 @@ function Get-LevelName {
     }
 }
 
+function Select-ValidAllowlistEntry {
+    <#
+    .SYNOPSIS
+      Validate and normalize allowlist entries, separating valid from malformed.
+    .DESCRIPTION
+      An entry is valid only if it has a non-empty string provider AND an id that coerces to int.
+      Tolerates: non-numeric id, missing provider, missing id, bare strings, etc.
+      Never throws.
+    #>
+    param(
+        [AllowEmptyCollection()][object[]]$Raw = @()
+    )
+
+    $valid = [System.Collections.Generic.List[object]]::new()
+    $errors = [System.Collections.Generic.List[object]]::new()
+
+    foreach ($e in $Raw) {
+        $hasProvider = $false
+        $providerValue = $null
+        $hasId = $false
+        $idValue = $null
+
+        # Handle null entries
+        if ($null -eq $e) {
+            $errors.Add([pscustomobject]@{
+                entry  = 'null'
+                reason = 'entry is null'
+            })
+            continue
+        }
+
+        # Safe property access: check existence before touching
+        if ($e.PSObject.Properties.Name -contains 'provider') {
+            $providerValue = $e.provider
+            $hasProvider = $true
+        }
+
+        if ($e.PSObject.Properties.Name -contains 'id') {
+            $idValue = $e.id
+            $hasId = $true
+        }
+
+        $reason = $null
+        $isValid = $false
+
+        if (-not $hasProvider) {
+            $reason = 'missing provider'
+        } elseif ([string]::IsNullOrWhiteSpace($providerValue)) {
+            $reason = 'provider is empty'
+        } elseif (-not $hasId) {
+            $reason = 'missing id'
+        } else {
+            # Try to coerce id to int safely
+            $idInt = $null
+            try {
+                $idInt = [int]$idValue
+                $isValid = $true
+            } catch {
+                $reason = "id '$idValue' is not numeric"
+            }
+
+            if ($isValid) {
+                $valid.Add([pscustomobject]@{
+                    provider = [string]$providerValue
+                    id       = $idInt
+                })
+            }
+        }
+
+        if (-not $isValid) {
+            # Record the error with compact representation
+            $entryStr = if ($e -is [string]) { $e } else { ($e | ConvertTo-Json -Compress) }
+            $errors.Add([pscustomobject]@{
+                entry  = $entryStr
+                reason = $reason
+            })
+        }
+    }
+
+    @{
+        Valid  = @($valid)
+        Errors = @($errors)
+    }
+}
+
 function Select-BriefEvent {
     <#
     .SYNOPSIS
@@ -44,6 +129,10 @@ function Select-BriefEvent {
 
     $cutoff = $Now.AddHours(-$WindowHours)
 
+    # Validate allowlist, use only valid entries
+    $validated = Select-ValidAllowlistEntry -Raw $Allowlist
+    $safeAllowlist = $validated.Valid
+
     $kept = foreach ($e in $Events) {
         if ($e.TimeCreated -lt $cutoff) { continue }
 
@@ -55,8 +144,8 @@ function Select-BriefEvent {
         if (-not ($levelOk -or $idOk)) { continue }
 
         $suppressed = $false
-        foreach ($a in $Allowlist) {
-            if ($a.provider -eq $e.ProviderName -and [int]$a.id -eq $e.Id) {
+        foreach ($a in $safeAllowlist) {
+            if ($a.provider -eq $e.ProviderName -and $a.id -eq $e.Id) {
                 $suppressed = $true
                 break
             }
@@ -116,13 +205,35 @@ function Get-BriefDigest {
     $now    = [datetime]::UtcNow
     $cutoff = $now.AddHours(-$WindowHours)
 
-    $allowlist = @()
+    # Load and validate allowlist from JSON
+    $rawAllowlist = @()
+    $allowlistErrors = @()
     if (Test-Path $AllowlistPath) {
-        $parsed = Get-Content $AllowlistPath -Raw | ConvertFrom-Json
-        if ($parsed.PSObject.Properties.Name -contains 'suppress') {
-            $allowlist = @($parsed.suppress)
+        try {
+            $parsed = Get-Content $AllowlistPath -Raw | ConvertFrom-Json
+            if ($parsed.PSObject.Properties.Name -contains 'suppress') {
+                $suppressValue = $parsed.suppress
+                # Handle suppress being not an array at all
+                if ($null -ne $suppressValue) {
+                    if ($suppressValue -is [array]) {
+                        $rawAllowlist = @($suppressValue)
+                    } else {
+                        $rawAllowlist = @($suppressValue)
+                    }
+                }
+            }
+        } catch {
+            $allowlistErrors += [pscustomobject]@{
+                entry  = 'allowlist file'
+                reason = "JSON parse error: $($_.Exception.Message)"
+            }
         }
     }
+
+    # Validate allowlist entries
+    $validated = Select-ValidAllowlistEntry -Raw $rawAllowlist
+    $allowlist = $validated.Valid
+    $allowlistErrors += @($validated.Errors)
 
     $read        = [System.Collections.Generic.List[string]]::new()
     $unavailable = [System.Collections.Generic.List[object]]::new()
@@ -138,6 +249,11 @@ function Get-BriefDigest {
             # Get-WinEvent raises a terminating error rather than returning empty
             # when nothing matches. That is a successful read of an empty window,
             # not an unavailable channel.
+            # Check by error ID first (locale-independent), fall back to message text.
+            if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound,*') {
+                $read.Add($short)
+                continue
+            }
             if ($_.Exception.Message -like '*No events were found*') {
                 $read.Add($short)
                 continue
@@ -160,8 +276,9 @@ function Get-BriefDigest {
         windowHours         = $WindowHours
         channelsRead        = @($read)
         channelsUnavailable = @($unavailable)
+        allowlistErrors     = @($allowlistErrors)
         events              = @(Select-BriefEvent -Events @($normalized) -Now $now -WindowHours $WindowHours -Allowlist $allowlist)
     }
 }
 
-Export-ModuleMember -Function Select-BriefEvent, Get-LevelName, Get-NormalizedEvent, Get-BriefDigest
+Export-ModuleMember -Function Select-BriefEvent, Get-LevelName, Get-NormalizedEvent, Get-BriefDigest, Select-ValidAllowlistEntry

@@ -430,6 +430,87 @@ Create `connectors/winevents/winevents-allowlist.json`. Starts empty; entries ge
 Add to `connectors/winevents/WinEventsCore.psm1`, before `Export-ModuleMember`:
 
 ```powershell
+function Select-ValidAllowlistEntry {
+    <#
+    .SYNOPSIS
+      Validate and normalize allowlist entries, separating valid from malformed.
+    .DESCRIPTION
+      An entry is valid only if it has a non-empty string provider AND an id that coerces to int.
+      Tolerates: non-numeric id, missing provider, missing id, bare strings, etc.
+      Never throws.
+    #>
+    param(
+        [AllowEmptyCollection()][object[]]$Raw = @()
+    )
+
+    $valid = [System.Collections.Generic.List[object]]::new()
+    $errors = [System.Collections.Generic.List[object]]::new()
+
+    foreach ($e in $Raw) {
+        if ($null -eq $e) {
+            $errors.Add([pscustomobject]@{
+                entry  = 'null'
+                reason = 'entry is null'
+            })
+            continue
+        }
+
+        $hasProvider = $false
+        $providerValue = $null
+        $hasId = $false
+        $idValue = $null
+
+        if ($e.PSObject.Properties.Name -contains 'provider') {
+            $providerValue = $e.provider
+            $hasProvider = $true
+        }
+
+        if ($e.PSObject.Properties.Name -contains 'id') {
+            $idValue = $e.id
+            $hasId = $true
+        }
+
+        $reason = $null
+        $isValid = $false
+
+        if (-not $hasProvider) {
+            $reason = 'missing provider'
+        } elseif ([string]::IsNullOrWhiteSpace($providerValue)) {
+            $reason = 'provider is empty'
+        } elseif (-not $hasId) {
+            $reason = 'missing id'
+        } else {
+            $idInt = $null
+            try {
+                $idInt = [int]$idValue
+                $isValid = $true
+            } catch {
+                $reason = "id '$idValue' is not numeric"
+            }
+
+            if ($isValid) {
+                $valid.Add([pscustomobject]@{
+                    provider = [string]$providerValue
+                    id       = $idInt
+                })
+            }
+        }
+
+        if (-not $isValid) {
+            $entryStr = if ($e -is [string]) { $e } else { ($e | ConvertTo-Json -Compress) }
+            $errors.Add([pscustomobject]@{
+                entry  = $entryStr
+                reason = $reason
+            })
+        }
+    }
+
+    @{
+        Valid  = @($valid)
+        Errors = @($errors)
+    }
+}
+
 function Get-NormalizedEvent {
     param(
         [Parameter(Mandatory)][object]$Raw,
@@ -460,13 +541,32 @@ function Get-BriefDigest {
     $now    = [datetime]::UtcNow
     $cutoff = $now.AddHours(-$WindowHours)
 
-    $allowlist = @()
+    $rawAllowlist = @()
+    $allowlistErrors = @()
     if (Test-Path $AllowlistPath) {
-        $parsed = Get-Content $AllowlistPath -Raw | ConvertFrom-Json
-        if ($parsed.PSObject.Properties.Name -contains 'suppress') {
-            $allowlist = @($parsed.suppress)
+        try {
+            $parsed = Get-Content $AllowlistPath -Raw | ConvertFrom-Json
+            if ($parsed.PSObject.Properties.Name -contains 'suppress') {
+                $suppressValue = $parsed.suppress
+                if ($null -ne $suppressValue) {
+                    if ($suppressValue -is [array]) {
+                        $rawAllowlist = @($suppressValue)
+                    } else {
+                        $rawAllowlist = @($suppressValue)
+                    }
+                }
+            }
+        } catch {
+            $allowlistErrors += [pscustomobject]@{
+                entry  = 'allowlist file'
+                reason = "JSON parse error: $($_.Exception.Message)"
+            }
         }
     }
+
+    $validated = Select-ValidAllowlistEntry -Raw $rawAllowlist
+    $allowlist = $validated.Valid
+    $allowlistErrors += @($validated.Errors)
 
     $read        = [System.Collections.Generic.List[string]]::new()
     $unavailable = [System.Collections.Generic.List[object]]::new()
@@ -479,9 +579,10 @@ function Get-BriefDigest {
             $raw = @(Get-WinEvent -FilterHashtable @{ LogName = $logName; StartTime = $cutoff } -ErrorAction Stop)
         }
         catch {
-            # Get-WinEvent raises a terminating error rather than returning empty
-            # when nothing matches. That is a successful read of an empty window,
-            # not an unavailable channel.
+            if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound,*') {
+                $read.Add($short)
+                continue
+            }
             if ($_.Exception.Message -like '*No events were found*') {
                 $read.Add($short)
                 continue
@@ -504,6 +605,7 @@ function Get-BriefDigest {
         windowHours         = $WindowHours
         channelsRead        = @($read)
         channelsUnavailable = @($unavailable)
+        allowlistErrors     = @($allowlistErrors)
         events              = @(Select-BriefEvent -Events @($normalized) -Now $now -WindowHours $WindowHours -Allowlist $allowlist)
     }
 }
@@ -512,7 +614,7 @@ function Get-BriefDigest {
 Update the export line:
 
 ```powershell
-Export-ModuleMember -Function Select-BriefEvent, Get-LevelName, Get-NormalizedEvent, Get-BriefDigest
+Export-ModuleMember -Function Select-BriefEvent, Get-LevelName, Get-NormalizedEvent, Get-BriefDigest, Select-ValidAllowlistEntry
 ```
 
 - [ ] **Step 5: Run tests to verify they pass**

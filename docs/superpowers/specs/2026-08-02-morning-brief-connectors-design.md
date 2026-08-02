@@ -123,6 +123,7 @@ token is cheap insurance, not defence in depth. Token lives in `.env`
   "windowHours": 24,
   "channelsRead": ["System", "Application", "Firewall", "Security"],
   "channelsUnavailable": [],
+  "allowlistErrors": [],
   "events": [
     {
       "channel": "System",
@@ -138,9 +139,15 @@ token is cheap insurance, not defence in depth. Token lives in `.env`
 }
 ```
 
-`channelsUnavailable` is load-bearing: if Security cannot be read the brief must
-say so rather than silently omit a whole category. A missing signal that looks
-like a quiet night is worse than an error.
+**Load-bearing properties:**
+
+- `channelsUnavailable`: if Security cannot be read the brief must say so rather
+  than silently omit a whole category. A missing signal that looks like a quiet
+  night is worse than an error.
+- `allowlistErrors`: if the allowlist JSON is malformed or contains invalid
+  entries, they are recorded here so the user is aware noise suppression is not
+  fully applied. An allowlist with syntax errors should not silently degrade to
+  no suppression.
 
 ---
 
