@@ -86,7 +86,7 @@ container to it is not obvious under WSL2 mirrored networking. Measured behavior
 | From | To | Result |
 |---|---|---|
 | WSL | `127.0.0.1:11434` | works — mirrored shares Windows loopback |
-| WSL | `192.168.50.202:11434` (host LAN IP) | fails |
+| WSL | `<host LAN IP>:11434` | fails |
 | container | `127.0.0.1` | fails — container's own loopback |
 | container | `172.17.0.1` / `host.docker.internal` | fails — nothing listening there |
 
