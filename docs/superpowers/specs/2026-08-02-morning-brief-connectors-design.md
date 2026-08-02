@@ -205,13 +205,51 @@ boot with ~25 GB free. This is the one point in the day it fits — and that
 reasoning must be preserved, because moving the job's schedule silently breaks
 its model choice.
 
+> **Open risk, observed 2026-08-02 (task 7): `local_heavy` did not emit a
+> single real tool call in 3/3 attempts**, against the now-real
+> `gbrief-winevents__windows_events_digest` tool, same one-line prompt each
+> time (`Call the windows_events_digest tool with hours=24 and report only:
+> ...`), fresh session key per attempt:
+>
+> | attempt | timeout | result |
+> |---|---|---|
+> | 1 | 30s (default) | hallucinated a pseudo-XML `<invoke name="exec">...` string as plain text instead of a structured tool call |
+> | 2 | 120s | timed out at the provider stage (`timeoutPhase: "provider"`) before producing any output at all |
+> | 3 | 240s | hallucinated a different fake tag, `<mcp action="callTool" name="list_tools">`, again as plain text |
+>
+> None of the three produced a `toolSummary`, meaning the harness never
+> recorded a real structured invocation — this is a distinct failure mode
+> from `main` (`ollama/qwen3.5:9b`), which across 4 attempts on the same
+> prompt either denied the tool existed, produced unrelated text, or narrated
+> "calling" it without a real call, but never hung at the provider stage.
+> Three trials is not a large sample and this was not tested against the
+> actual rewritten brief prompt (still a phase-3 item) — this is a negative
+> result on the current one-line prompt, not proof the 27B can never call
+> tools. But it is a specific, reproduced-3-times negative result against the
+> exact model this component's design depends on, and it means the prompt
+> rewrite alone may not be sufficient: the harness's tool-calling handshake
+> with this Ollama model may itself need verification before phase 3 treats
+> `local_heavy` as reliable. Re-test after the prompt rewrite lands, with a
+> larger sample, before relying on this model in production.
+
 **Timeout:** `--timeout-seconds` set from a measured cold-start run on a realistic
 payload. Not guessed. Measurement is a task in the implementation plan.
 
-**Tools:** per-job allowlist via `--tools`, limited to the three connector tools
-(`google_calendar_today`, `google_mail_digest`, `windows_events_digest`). The agent
-default is `tools.profile: coding`, which grants exec and write; an unattended job
-that ingests external content must not inherit that.
+**Tools:** per-job allowlist via `--tools`, limited to the three connector tools.
+The `windows_events_digest` tool's real runtime id — the only one of the three
+actually registered as of task 7 — is `gbrief-winevents__windows_events_digest`
+(server name + `__` + tool name; confirmed by `mcp probe` and by what agents
+see in their tool list). **Use the namespaced form in the allow-list, not the
+bare tool name** — see the verified callout immediately below, which found
+that `--tools` does not normalize between the two forms, so writing the bare
+name is silently wrong, not an equivalent shorthand. The Google tools
+(`google_calendar_today`, `google_mail_digest`) are phase-2 work; their
+connector server names, and therefore their final namespaced tool ids, are
+not yet known and must be confirmed the same way once that connector is
+registered — do not assume they'll match the bare names used here as
+placeholders. The agent default is `tools.profile: coding`, which grants exec
+and write; an unattended job that ingests external content must not inherit
+that.
 
 > **Verified 2026-08-02 (task 7), against a disabled throwaway cron job, not the
 > live Morning brief job.** `gbrief-winevents` is registered and probes as
