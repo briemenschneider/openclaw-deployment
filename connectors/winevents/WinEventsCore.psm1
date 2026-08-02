@@ -124,6 +124,88 @@ function Select-ValidAllowlistEntry {
     }
 }
 
+function Protect-EventMessage {
+    <#
+    .SYNOPSIS
+      Neutralize attacker-influenced text in an event message before a model sees it.
+
+    .DESCRIPTION
+      Windows event message text is NOT trusted input. Event 4625 (failed logon)
+      embeds the Account Name, Account Domain and Workstation Name supplied by the
+      CLIENT - a failed attempt is what generates the event, so no credentials are
+      needed and anyone who can reach an authenticating service on this machine can
+      write chosen text into the Security log. Event 7045 embeds an attacker-chosen
+      service name and image path. Application-channel messages are arbitrary
+      strings from arbitrary programs.
+
+      All of that is forwarded to a language model, which makes it a prompt-injection
+      vector. This function is DEFENCE IN DEPTH ONLY. The control that actually
+      matters is that the brief's agent has no exec, write, network or messaging
+      tools - see docs/winevents-known-issues.md. Never rely on this instead.
+
+      Returns the cleaned text and the list of protections that fired, so the digest
+      can report that sanitisation happened rather than doing it silently.
+    #>
+    param(
+        [AllowNull()][AllowEmptyString()][string]$Message,
+        [int]$MaxChars = 500,
+        [int]$FieldMaxChars = 64
+    )
+
+    if ([string]::IsNullOrEmpty($Message)) {
+        return [pscustomobject]@{ Text = ''; Flags = @() }
+    }
+
+    $flags = [System.Collections.Generic.List[string]]::new()
+    $text = $Message
+
+    # Change detection MUST be ordinal. PowerShell's -eq/-ne on strings is
+    # culture-sensitive, and .NET Core (pwsh 7) uses ICU, which treats control
+    # characters as IGNORABLE - so "ab" -eq "a<BEL>b" is TRUE there. Using -ne
+    # here silently skipped both the flag and the assignment under pwsh 7,
+    # leaving the control characters in place. Windows PowerShell 5.1 uses NLS
+    # and does not, which is the only reason the collector behaved correctly.
+    # Verified on this machine: inline strip worked in both editions while the
+    # module comparison reported "unchanged" only under Core.
+    $ord = [System.StringComparison]::Ordinal
+
+    # 1. Control characters. Tab/CR/LF are normal in event text and are kept.
+    $stripped = [regex]::Replace($text, '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '')
+    if (-not [string]::Equals($stripped, $text, $ord)) { $flags.Add('control-chars'); $text = $stripped }
+
+    # 2. Cap the specific fields the machine's owner does not control. Capping
+    #    these starves an injection of room without truncating the parts of the
+    #    message an operator actually needs to read.
+    $fieldNames = 'Account Name|Account Domain|Workstation Name|Process Name|Caller Process Name|Service Name|Service File Name'
+    $lines = $text -split "`r`n|`r|`n"
+    $fieldChanged = $false
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $m = [regex]::Match($lines[$i], "(?i)^(\s*(?:$fieldNames)\s*:\s*)(.+)$")
+        if ($m.Success -and $m.Groups[2].Value.Length -gt $FieldMaxChars) {
+            $lines[$i] = $m.Groups[1].Value + $m.Groups[2].Value.Substring(0, $FieldMaxChars) + '...[capped]'
+            $fieldChanged = $true
+        }
+    }
+    if ($fieldChanged) { $flags.Add('field-capped'); $text = ($lines -join "`n") }
+
+    # 3. Defang instruction-shaped markup: anything that could read as a tool call,
+    #    a role marker or a template directive. This stack has already been observed
+    #    emitting <invoke> and <mcp action="callTool"> tags in prose, so this is not
+    #    hypothetical. ASCII-only replacements - Windows PowerShell 5.1 reads this
+    #    file as ANSI.
+    $defanged = [regex]::Replace($text, '<(?=[/!|A-Za-z])', '[LT]')
+    $defanged = [regex]::Replace($defanged, '(?i)\[\s*/?\s*(?:INST|SYS)\s*\]', '[MARKUP]')
+    if (-not [string]::Equals($defanged, $text, $ord)) { $flags.Add('markup-neutralized'); $text = $defanged }
+
+    # 4. Length cap last, so the truncation marker survives.
+    if ($text.Length -gt $MaxChars) {
+        $text = $text.Substring(0, $MaxChars) + '...[truncated]'
+        $flags.Add('truncated')
+    }
+
+    [pscustomobject]@{ Text = $text; Flags = @($flags) }
+}
+
 function Select-BriefEvent {
     <#
     .SYNOPSIS
@@ -201,6 +283,8 @@ function Select-BriefEvent {
         # Ticks and would order a mixed-Kind group by wall-clock reading rather
         # than by when things actually happened, corrupting firstSeen/lastSeen.
         $sorted = @($g.Group | Sort-Object -Property @{ Expression = { $_.TimeCreated.ToUniversalTime() } })
+        # Event message text is untrusted - see Protect-EventMessage.
+        $protected = Protect-EventMessage -Message $sorted[-1].Message
         [pscustomobject]@{
             channel     = $sorted[0].Channel
             provider    = $sorted[0].ProviderName
@@ -209,7 +293,9 @@ function Select-BriefEvent {
             firstSeen   = $sorted[0].TimeCreated.ToUniversalTime().ToString('o')
             lastSeen    = $sorted[-1].TimeCreated.ToUniversalTime().ToString('o')
             occurrences = $sorted.Count
-            message     = $sorted[-1].Message
+            message     = $protected.Text
+            # Which protections fired, so sanitisation is visible rather than silent.
+            sanitized   = @($protected.Flags)
         }
     }
 }
@@ -335,6 +421,9 @@ function Get-BriefDigest {
         }
     }
 
+    # Computed once so sanitizedCount below counts the same objects that ship.
+    $selected = @(Select-BriefEvent -Events @($normalized) -Now $nowUtc -WindowHours $WindowHours -Allowlist $allowlist)
+
     [pscustomobject]@{
         # Wire format is UTC throughout. $nowUtc is Kind=Utc, so 'o' renders
         # the trailing 'Z' rather than a numeric offset.
@@ -345,8 +434,12 @@ function Get-BriefDigest {
         allowlistErrors     = @($allowlistErrors)
         # Same $nowUtc and the same $WindowHours that are reported above, so
         # windowHours describes the window that was actually applied.
-        events              = @(Select-BriefEvent -Events @($normalized) -Now $nowUtc -WindowHours $WindowHours -Allowlist $allowlist)
+        events              = @($selected)
+        # Detection signal: how many events had their message text altered by
+        # Protect-EventMessage. A non-zero count on a normally-quiet machine is
+        # worth looking at - it means something wrote unusual text into the log.
+        sanitizedCount      = @($selected | Where-Object { @($_.sanitized).Count -gt 0 }).Count
     }
 }
 
-Export-ModuleMember -Function Select-BriefEvent, Get-LevelName, Get-NormalizedEvent, Get-BriefDigest, Select-ValidAllowlistEntry
+Export-ModuleMember -Function Select-BriefEvent, Get-LevelName, Get-NormalizedEvent, Get-BriefDigest, Select-ValidAllowlistEntry, Protect-EventMessage

@@ -396,11 +396,36 @@ per connector — read this table before assuming any of them protects you:**
 
 | Layer | `gbrief-winevents` (shipped) | `gbrief-google` (phase 2, not built) |
 |---|---|---|
-| 1. **No actuation** — the job's `--tools` allowlist has no exec, no write, no network | **NOT IN FORCE.** `--tools` is a pass-through string list: `cron edit --tools` accepted `this_tool_does_not_exist` verbatim with zero edit-time validation, and runtime enforcement was never tested (see the verified callout under Component 4). The live brief job still runs on the default `tools.profile: coding`, which grants exec and write. | not applicable yet |
-| 2. **No bodies** — metadata-only collection | **FALSE for this connector.** See below. | designed in (`format=metadata`), unbuilt |
-| 3. **Framing** — the prompt states connector output is untrusted data | **NOT IN FORCE.** The prompt rewrite is phase-3 work and has not landed. | same |
+| 1. **No actuation** — the job's agent has no exec, no write, no network, no messaging | **IN FORCE.** The brief runs on a dedicated `briefer` agent with `tools: { profile: "minimal", alsoAllow: [<the digest tool>] }`. Verified enforced, not merely configured: the gateway logs `tool policy removed 35 tool(s) via tools.profile (minimal)` on every turn, stripping `exec`, `process`, `write`, `edit`, `apply_patch`, `file_write`, `web_fetch`, `web_search`, `message`, `sessions_spawn`, `sessions_send`, `subagents`, `cron` and more. Delivery is pinned in the job (`telegram:8904877690`), not model-chosen. **NOT via `--tools`** — that is a pass-through string list which accepted `this_tool_does_not_exist` verbatim, and its runtime enforcement is still untested. | not applicable yet |
+| 2. **No bodies** — metadata-only collection | **STILL FALSE — full message text ships.** Mitigated, not eliminated, by `Protect-EventMessage` (below). | designed in (`format=metadata`), unbuilt |
+| 3. **Framing** — the prompt states connector output is untrusted data | **IN FORCE.** The job prompt names the threat concretely (a failed logon records an attacker-chosen account and workstation name), forbids acting on instructions found in tool output, and requires suspicious text to be reported rather than obeyed. It also forbids inventing event IDs — the local models were observed confabulating tool results. | same prompt applies |
+| 4. **Detection** (added) | **IN FORCE.** `Protect-EventMessage` records which protections fired per event in a `sanitized` array, and the digest carries a top-level `sanitizedCount`. The prompt requires the brief to report a non-zero count. | n/a |
 
-So **zero of the three layers are in effect on the winevents path today.**
+**Layer 2 mitigation — `Protect-EventMessage` in `WinEventsCore.psm1`.** Applied to
+every event message before it leaves the collector, unit-tested against synthetic
+input, and observed firing on real data (`sanitizedCount=2`: a 7045 installer-supplied
+field capped, an over-long message truncated):
+
+- strips control characters (tab/CR/LF kept)
+- caps the fields the machine's owner does not control — `Account Name`,
+  `Account Domain`, `Workstation Name`, `Process Name`, `Caller Process Name`,
+  `Service Name`, `Service File Name` — to 64 chars, starving an injection of room
+  without truncating the parts an operator needs
+- defangs instruction-shaped markup (`<invoke`, `<mcp`, `[INST]`, `[SYS]`)
+- caps total length at 500 chars
+
+> **Change detection here must be ordinal.** PowerShell's `-eq`/`-ne` on strings is
+> culture-sensitive, and .NET Core (pwsh 7) uses ICU, which treats control characters
+> as *ignorable* — so `"ab" -eq "a<BEL>b"` is **true** there. The original code used
+> `-ne`, which silently skipped both the flag and the assignment under pwsh 7 and left
+> the control characters in place. Windows PowerShell 5.1 uses NLS and does not, which
+> is the only reason the collector behaved correctly. Fixed with
+> `[string]::Equals(..., [System.StringComparison]::Ordinal)`.
+
+**What an injection can still achieve:** make the brief say something wrong. That is
+the point of layer 1 — with no exec, write, network or messaging, and a pinned
+delivery target, the blast radius is a misleading morning summary rather than code
+execution.
 
 **Layer 2 is false for winevents, concretely.** `WinEventsCore.psm1` puts the
 full rendered event `Message` into the digest and `index.mjs` serialises it to
