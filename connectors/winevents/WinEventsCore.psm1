@@ -119,6 +119,30 @@ function Select-BriefEvent {
     <#
     .SYNOPSIS
       Filter and deduplicate normalized event records. Pure - no event log access.
+    .DESCRIPTION
+      TIME HANDLING - read this before touching any comparison below.
+
+      System.DateTime comparison uses Ticks ONLY and ignores DateTimeKind. A
+      Kind=Local value and a Kind=Utc value that denote the SAME instant have
+      different Ticks (they differ by the machine's UTC offset), so comparing
+      them directly skews the window by that offset - silently, and with the
+      sign flipping either side of Greenwich. That is not hypothetical: it
+      shipped. $Now was [datetime]::UtcNow (Kind=Utc) while TimeCreated came
+      from Get-WinEvent (Kind=Local), which turned a requested 24h window into
+      26h on this UTC+2 machine and would have made it 19h on a UTC-5 one -
+      dropping exactly the overnight period the brief exists to cover.
+
+      It is easy to reintroduce because PowerShell hides it: [datetime]'...Z'
+      does NOT produce a Kind=Utc value, it converts to local time and stamps
+      the result Kind=Local. So a test that builds both sides from Z-strings
+      has two Local values and never sees the bug.
+
+      The rule here: never compare or sort raw DateTime values. Convert every
+      side to UTC with .ToUniversalTime() first - it is Kind-aware (Local
+      converts, Utc is a no-op, Unspecified is treated as local, which is the
+      correct reading of a Get-WinEvent timestamp). This function is exported
+      and callers may hand it either Kind, so it normalizes rather than
+      assuming.
     #>
     param(
         [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Events,
@@ -127,14 +151,17 @@ function Select-BriefEvent {
         [AllowEmptyCollection()][object[]]$Allowlist = @()
     )
 
-    $cutoff = $Now.AddHours(-$WindowHours)
+    # Normalize to UTC BEFORE subtracting, so the cutoff is exactly
+    # $WindowHours of real elapsed time from $Now whatever Kind $Now carries.
+    $cutoffUtc = $Now.ToUniversalTime().AddHours(-$WindowHours)
 
     # Validate allowlist, use only valid entries
     $validated = Select-ValidAllowlistEntry -Raw $Allowlist
     $safeAllowlist = $validated.Valid
 
     $kept = foreach ($e in $Events) {
-        if ($e.TimeCreated -lt $cutoff) { continue }
+        # Both sides in UTC - see the DateTimeKind note in .DESCRIPTION.
+        if ($e.TimeCreated.ToUniversalTime() -lt $cutoffUtc) { continue }
 
         if (-not $script:ChannelPolicy.Contains($e.Channel)) { continue }
         $policy = $script:ChannelPolicy[$e.Channel]
@@ -161,7 +188,10 @@ function Select-BriefEvent {
     $groups = $kept | Group-Object -Property { "$($_.Channel)|$($_.ProviderName)|$($_.Id)" }
 
     foreach ($g in $groups) {
-        $sorted = @($g.Group | Sort-Object TimeCreated)
+        # Sort on the UTC instant, not the raw DateTime: Sort-Object compares
+        # Ticks and would order a mixed-Kind group by wall-clock reading rather
+        # than by when things actually happened, corrupting firstSeen/lastSeen.
+        $sorted = @($g.Group | Sort-Object -Property @{ Expression = { $_.TimeCreated.ToUniversalTime() } })
         [pscustomobject]@{
             channel     = $sorted[0].Channel
             provider    = $sorted[0].ProviderName
@@ -176,6 +206,17 @@ function Select-BriefEvent {
 }
 
 function Get-NormalizedEvent {
+    <#
+    .SYNOPSIS
+      Map a Get-WinEvent record onto the shape Select-BriefEvent consumes.
+    .DESCRIPTION
+      TimeCreated is converted to Kind=Utc here so that every record leaving
+      this function denotes an unambiguous instant. Get-WinEvent returns
+      Kind=Local; carrying that Kind downstream is what allowed the 24h window
+      to become 26h (see Select-BriefEvent's .DESCRIPTION). Normalizing at the
+      boundary means the rest of the module handles one Kind, and the UTC wire
+      format the digest emits is then a straight ToString('o').
+    #>
     param(
         [Parameter(Mandatory)][object]$Raw,
         [Parameter(Mandatory)][string]$Channel
@@ -187,7 +228,7 @@ function Get-NormalizedEvent {
         ProviderName = $Raw.ProviderName
         Id           = [int]$Raw.Id
         Level        = [int]$Raw.Level
-        TimeCreated  = $Raw.TimeCreated
+        TimeCreated  = $Raw.TimeCreated.ToUniversalTime()
         Message      = $msg
     }
 }
@@ -202,8 +243,22 @@ function Get-BriefDigest {
         [string]$AllowlistPath = "$PSScriptRoot\winevents-allowlist.json"
     )
 
-    $now    = [datetime]::UtcNow
-    $cutoff = $now.AddHours(-$WindowHours)
+    # Anchor everything on one UTC instant so the reported windowHours and the
+    # window actually applied cannot drift apart.
+    $nowUtc    = [datetime]::UtcNow
+    $cutoffUtc = $nowUtc.AddHours(-$WindowHours)
+
+    # Get-WinEvent's -FilterHashtable StartTime is interpreted as LOCAL
+    # wall-clock REGARDLESS of the value's DateTimeKind - it does not convert a
+    # Kind=Utc value, it reads its wall-clock fields as if they were local.
+    # Verified on this machine (UTC+2): a Kind=Utc "3 hours ago" returned
+    # events up to 4h45m old, while a Kind=Local "3 hours ago" returned exactly
+    # 3h. So the cutoff handed to Get-WinEvent must be the local-wall-clock
+    # rendering of the instant we want. Deriving it with .ToLocalTime() from
+    # the UTC cutoff (rather than doing the arithmetic in local time) keeps it
+    # exactly $WindowHours of REAL elapsed time even across a DST transition,
+    # where local-time arithmetic would be off by an hour.
+    $queryStartLocal = $cutoffUtc.ToLocalTime()
 
     # Load and validate allowlist from JSON
     $rawAllowlist = @()
@@ -243,7 +298,7 @@ function Get-BriefDigest {
         $logName = $script:ChannelMap[$short]
         $raw = $null
         try {
-            $raw = @(Get-WinEvent -FilterHashtable @{ LogName = $logName; StartTime = $cutoff } -ErrorAction Stop)
+            $raw = @(Get-WinEvent -FilterHashtable @{ LogName = $logName; StartTime = $queryStartLocal } -ErrorAction Stop)
         }
         catch {
             # Get-WinEvent raises a terminating error rather than returning empty
@@ -272,12 +327,16 @@ function Get-BriefDigest {
     }
 
     [pscustomobject]@{
-        generatedAt         = $now.ToString('o')
+        # Wire format is UTC throughout. $nowUtc is Kind=Utc, so 'o' renders
+        # the trailing 'Z' rather than a numeric offset.
+        generatedAt         = $nowUtc.ToString('o')
         windowHours         = $WindowHours
         channelsRead        = @($read)
         channelsUnavailable = @($unavailable)
         allowlistErrors     = @($allowlistErrors)
-        events              = @(Select-BriefEvent -Events @($normalized) -Now $now -WindowHours $WindowHours -Allowlist $allowlist)
+        # Same $nowUtc and the same $WindowHours that are reported above, so
+        # windowHours describes the window that was actually applied.
+        events              = @(Select-BriefEvent -Events @($normalized) -Now $nowUtc -WindowHours $WindowHours -Allowlist $allowlist)
     }
 }
 
