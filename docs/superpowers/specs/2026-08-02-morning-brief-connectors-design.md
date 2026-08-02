@@ -21,7 +21,13 @@ We want the brief to cover three things:
 
 ## Non-goals
 
-- Reading or acting on message bodies. Metadata only. See Security.
+- Reading or acting on **mail** bodies. `gbrief-google` is metadata-only by
+  design and by test. **This non-goal does NOT extend to Windows event
+  messages**, despite how the original wording read: `gbrief-winevents` ships
+  the full rendered event `Message`, and the "Output shape" example below shows
+  one. That is a deliberate trade — an event id without its message is not
+  actionable — but it means the metadata-only argument in Security applies to
+  exactly one of the two connectors. See Security.
 - Replying to mail, creating events, or any write operation anywhere.
 - Real-time alerting. This is one batch report per day.
 - Router or appliance logs. Scope is Windows event channels only.
@@ -37,11 +43,12 @@ belongs, both surfaced to OpenClaw as **stdio MCP servers inside the container**
   WINDOWS                          WSL2                      CONTAINER
   ---------------------------      -------------------       -------------------------
   winevents-collector.ps1
+    Windows PowerShell 5.1
     Get-WinEvent -> filter
     HttpListener 127.0.0.1:18790
              |                                               gbrief-winevents (stdio MCP)
              |                     winevents-fwd (socat)       -> HTTP GET  ------+
-             +-------------------- 172.17.0.1:18790 <----------------------------+
+             +-------------------- 172.17.0.1:18791 <----------------------------+
                                    connect-timeout=5
 
                                                              gbrief-google (stdio MCP)
@@ -69,14 +76,50 @@ pattern, with `connect-timeout=5` from the start so a dead collector fails in
 seconds rather than presenting as an opaque timeout (see
 `docker-compose.yml` for the full write-up of that failure mode).
 
+**The container-facing port is 18791, not 18790, and that is not cosmetic.**
+Under WSL2 mirrored networking Windows and WSL share one port namespace, so
+`172.17.0.1:18790` cannot be bound at all while the Windows collector holds
+`127.0.0.1:18790` — it fails with `Address in use`. 18791 is the one number
+that must not be "tidied" back to match the upstream port. Same reason
+`ollama-fwd` is 11435 -> 11434.
+
 ---
 
 ## Component 1: `winevents-collector.ps1` (Windows)
 
-**Runtime:** PowerShell 7.6.4 (present; no Node, no configured Python on Windows).
+**Runtime: Windows PowerShell 5.1**
+(`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`), permanently.
+An earlier draft of this spec said PowerShell 7.6.4; that is no longer true.
+Task Scheduler builds its child environment from the persisted Machine/User
+PATH, which resolves a bare `pwsh.exe` to the 0-byte App Execution Alias stub
+and fails with ERROR_FILE_NOT_FOUND. Resolving `$PSHOME` at registration time
+bakes in a version-pinned MSIX path that goes stale on the next upgrade; a
+launcher that resolved it at run time orphaned the collector on a manual stop.
+The task therefore invokes the System32 5.1 binary directly, and that path is
+as stable as pwsh's was unstable.
 
-**Trigger:** Scheduled task at logon, unelevated, mirroring the existing
-`Ollama - autostart at logon` task.
+> **Consequence for contributors: the ASCII-only rule on `.ps1`/`.psm1` files
+> in this connector is LOAD-BEARING, not stylistic**, and so is 5.1-compatible
+> syntax. There is no pwsh 7 anywhere in the collector's runtime path. Do not
+> introduce `??`, `?.`, ternaries, `Get-Error`, or any other 7.x-only
+> construct, and do not assume UTF-8 source handling. Verify changes under
+> Windows PowerShell 5.1, not just pwsh 7 — the Pester suite is run under
+> both for this reason.
+
+**Triggers:** two, on one unelevated scheduled task, mirroring the existing
+`Ollama - autostart at logon` task:
+
+1. **At logon**, 45s delay — the normal case of logging in fresh. Longer than
+   the Ollama task's 30s because the collector is not on the critical path for
+   07:15 and should not compete with model loading during the boot storm.
+2. **Daily at 07:05 local** — a safety net, ten minutes before the 07:15
+   morning-brief cron, so a collector that died overnight is back before the
+   brief runs even if the machine was never logged out. This trigger assumes
+   the machine's timezone is Europe/Berlin; `register-winevents-task.ps1`
+   asserts that and refuses to register otherwise.
+
+`MultipleInstances=IgnoreNew` — not script-level idempotence — is what
+prevents the two triggers racing for port 18790.
 
 **Listener:** `System.Net.HttpListener` on `http://127.0.0.1:18790/`.
 
@@ -90,8 +133,32 @@ seconds rather than presenting as an opaque timeout (see
 **Auth:** Static bearer token, `X-Brief-Token` header, compared with a
 constant-time check. Under mirrored networking `127.0.0.1` is shared between
 Windows and WSL, so the endpoint is reachable by anything on either side — the
-token is cheap insurance, not defence in depth. Token lives in `.env`
-(`WINEVENTS_TOKEN`) and in a `0600` file the scheduled task reads.
+token is cheap insurance, not defence in depth.
+
+**The token exists in three places, and rotation must update all three:**
+
+| Location | Read by | Notes |
+|---|---|---|
+| `.env` (`WINEVENTS_TOKEN`) | the container, via compose `env_file` | gitignored |
+| `%LOCALAPPDATA%\OpenClawBrief\winevents.token` | the collector, once at startup | NTFS ACL restricted to the owning user with `icacls /inheritance:r` — the Windows equivalent of `0600`, not a literal mode bit. The collector must be restarted to pick up a new value. |
+| `mcp.servers.gbrief-winevents.env.WINEVENTS_TOKEN` in `openclaw.json` | the MCP shim | **cleartext**, inside the `openclaw-config` volume |
+
+The third copy is not redundant and cannot currently be removed. Measured
+2026-08-02: openclaw does **not** hand its own environment to the stdio MCP
+servers it spawns. A probe server that encoded env-var *presence* (never
+values) into its tool name registered without `--env` probed as
+`token_ABSENT__url_ABSENT__home_PRESENT`, while `WINEVENTS_TOKEN` was
+demonstrably in the openclaw process's own `/proc/1/environ`; the same server
+registered *with* `--env` probed as `token_PRESENT`. A SecretRef
+(`{"source":"env","id":...}`, as `gateway.auth.token` uses) is rejected —
+`mcp.servers.*.env` values must be strings.
+
+Rotation order matters: update `.env`, recreate the openclaw container so
+`env_file` reloads, `openclaw mcp unset gbrief-winevents` and re-run
+`deploy-connectors.ps1` to re-register from the container's fresh environment,
+update the token file, then restart the scheduled task. Miss the third copy and
+the shim sends a stale token, the chain returns 401, and the only place it
+shows is inside a tool result nobody reads.
 
 **Channels:**
 
@@ -104,11 +171,20 @@ token is cheap insurance, not defence in depth. Token lives in `.env`
 
 **Filtering — deterministic, in code, not model judgment:**
 
-- Window: last N hours, default 24, from `TimeCreated`
+- Window: last N hours, default 24, from `TimeCreated`, measured as REAL
+  ELAPSED TIME. Every comparison is normalized to UTC first: `Get-WinEvent`
+  returns `Kind=Local` timestamps and reads its own `StartTime` filter as local
+  wall-clock regardless of `DateTimeKind`, while `DateTime` comparison uses
+  Ticks and ignores Kind. Mixing the two silently widened the window by the
+  machine's UTC offset (24h became 26h at UTC+2, and would have been 19h at
+  UTC-5). See `Select-BriefEvent`'s `.DESCRIPTION`. `windowHours` in the
+  payload is the window that was applied, asserted by test.
 - Level: Critical (1) and Error (2) only for System/Application
 - Firewall channel: rule add/modify/delete, and blocked-inbound events
-- Security channel: failed logon (4625), new service install (7045), audit policy
-  change (4719), privilege assignment (4672)
+  (2004, 2005, 2006, 2009, 2033)
+- System channel, regardless of level: new service install (7045)
+- Security channel: failed logon (4625), audit policy change (4719), special
+  privileges assigned (4672), packet drop / connection blocked (5152, 5157)
 - Noise allowlist: a maintained list of `{provider, id}` pairs known benign on this
   machine, in `winevents-allowlist.json` beside the script so it can be tuned
   without editing code
@@ -182,11 +258,14 @@ by a unit test, not just by convention.
 
 ## Component 3: `gbrief-winevents` (container, stdio MCP)
 
-~60 lines of Node. Exposes one tool, `windows_events_digest`, which GETs
-`http://host.docker.internal:18790/events?hours=24` with the bearer token and
-returns the JSON verbatim. No logic beyond transport, error mapping, and a 10s
-timeout. All filtering lives in PowerShell where it is testable against synthetic
-events.
+~120 lines of Node. Exposes one tool, `windows_events_digest`, which GETs
+`http://host.docker.internal:18791/events?hours=24` (the **forwarder's** port —
+see "Why the socat forwarder") with the bearer token and returns the JSON
+verbatim. No logic beyond transport, error mapping, and a 10s timeout. All
+filtering lives in PowerShell where it is testable against synthetic events.
+
+Registered by `deploy-connectors.ps1` (add-if-absent, so re-running is safe).
+Its runtime tool id is `gbrief-winevents__windows_events_digest`.
 
 If the collector is unreachable the tool returns a structured error rather than
 throwing, so the brief can report "event collection unavailable" instead of the
@@ -196,14 +275,21 @@ whole run failing.
 
 ## Component 4: the brief job
 
-**Model:** `--agent local_heavy` (`ollama/qwen3.6:27b`).
+**Model:** `--agent local_heavy` (`ollama/qwen3.6:27b`) — **not settled. See the
+open risk below before building on this.**
 
-The 27B is viable *specifically because of when this runs*. It needs ~17 GB and
-spills past the 12 GiB 4080; at 10:00 on a working machine there is 0.2 GB
+The 27B *fits in memory* specifically because of when this runs. It needs ~17 GB
+and spills past the 12 GiB 4080; at 10:00 on a working machine there is 0.2 GB
 available and it would thrash. At 07:15 the machine is four minutes past a cold
-boot with ~25 GB free. This is the one point in the day it fits — and that
-reasoning must be preserved, because moving the job's schedule silently breaks
-its model choice.
+boot with ~25 GB free. That reasoning must be preserved if the schedule ever
+moves, because moving the job silently breaks the memory argument.
+
+**But fitting is not the same as working.** The memory argument was the only
+argument this section originally made, and it settles nothing: this branch's own
+evidence has since falsified the choice on *capability*, which is a strictly
+harder problem than VRAM. The 27B produced no real tool call in 3/3 attempts and
+the 9B failed in 4/4. Treat the model as an open question with a memory
+constraint attached, not as a decision.
 
 > **Open risk, observed 2026-08-02 (task 7): `local_heavy` did not emit a
 > single real tool call in 3/3 attempts**, against the now-real
@@ -300,19 +386,55 @@ security · Collection failures.
 
 ## Security
 
-**Injection.** Subjects and sender names are attacker-controlled: anyone can send
-mail whose subject reads like an instruction. Three layers, in order of
-importance:
+**Injection.** Attacker-influenced text reaches the model on both connector
+paths: anyone can send mail whose subject reads like an instruction, and — as
+detailed below — anyone who can reach an authenticating service on this machine
+can put chosen text into a Windows event message.
 
-1. **No actuation.** The job's `--tools` allowlist has no exec, no write, no
-   network. A successful injection has nothing to act on. This is the control that
-   matters; the others are depth.
-2. **No bodies.** Metadata-only collection removes the large majority of the
-   attack surface.
-3. **Framing.** The prompt states that all connector output is untrusted data.
+The design calls for three layers. **State of each one at the end of phase 1,
+per connector — read this table before assuming any of them protects you:**
+
+| Layer | `gbrief-winevents` (shipped) | `gbrief-google` (phase 2, not built) |
+|---|---|---|
+| 1. **No actuation** — the job's `--tools` allowlist has no exec, no write, no network | **NOT IN FORCE.** `--tools` is a pass-through string list: `cron edit --tools` accepted `this_tool_does_not_exist` verbatim with zero edit-time validation, and runtime enforcement was never tested (see the verified callout under Component 4). The live brief job still runs on the default `tools.profile: coding`, which grants exec and write. | not applicable yet |
+| 2. **No bodies** — metadata-only collection | **FALSE for this connector.** See below. | designed in (`format=metadata`), unbuilt |
+| 3. **Framing** — the prompt states connector output is untrusted data | **NOT IN FORCE.** The prompt rewrite is phase-3 work and has not landed. | same |
+
+So **zero of the three layers are in effect on the winevents path today.**
+
+**Layer 2 is false for winevents, concretely.** `WinEventsCore.psm1` puts the
+full rendered event `Message` into the digest and `index.mjs` serialises it to
+the model verbatim — messages up to 879 characters observed on this machine in
+a routine 24h window. Two events in the inclusion policy carry
+attacker-influenced fields:
+
+- **4625 (failed logon)** embeds the *Account Name*, *Account Domain* and
+  *Workstation Name* **supplied by the client**. An unauthenticated party who
+  can reach any authenticating service on this machine can therefore place text
+  of their choosing into a field that ends up in the model's context. No
+  credentials required — a failed attempt is exactly what generates the event.
+- **7045 (service install)** embeds an attacker-chosen *service name* and
+  *image path*.
+
+**This is inert today for one reason only: no model in the current stack can
+emit a tool call** (3/3 and 4/4 failures, Component 4). That is a property of
+the model's incapability, not of any control in this design.
+
+> **Sequencing constraint for phase 3 — do not violate this.** A capable model
+> and the injection mitigations must land **together**. Never model-first.
+> Making the brief's model able to call tools, on a job that still runs with
+> `tools.profile: coding` (exec + write), while ingesting attacker-influenced
+> event message bodies with no framing, converts a documentation gap into
+> remote code execution triggered by a failed logon. The correct order is:
+> enforce a restricted tool boundary and verify it live-fire, land the framing
+> prompt, decide whether message bodies are truncated/structured/dropped — and
+> only then upgrade model capability.
 
 **Credentials.** Google tokens in the config volume at `0600`, never in git.
-`WINEVENTS_TOKEN` in `.env`, already gitignored. The collector runs unelevated.
+`WINEVENTS_TOKEN` lives in three places, one of them cleartext inside the
+`openclaw-config` volume — see the Auth table under Component 1 for the full
+list, the measurement showing the cleartext copy cannot currently be avoided,
+and the rotation order. None of them are in git. The collector runs unelevated.
 
 **Privilege.** Security-log access comes from **Event Log Readers** group
 membership, not from running elevated. An always-on elevated process feeding an
@@ -328,9 +450,10 @@ forwarder relies on.
 
 | Component | Framework | Covers |
 |---|---|---|
-| `winevents-collector.ps1` | Pester | 24h boundary, level filter, allowlist suppression, dedup/occurrence counting, unavailable-channel reporting, auth rejection |
+| `WinEventsCore.psm1` | Pester | 24h boundary **including deliberate DateTimeKind mismatches and the StartTime handed to `Get-WinEvent`**, level filter, allowlist validation/suppression, dedup/occurrence counting, unavailable-channel reporting |
+| `winevents-collector.ps1` | Pester | error-body JSON escaping, constant-time token compare, exit-code contract, response close-on-write-failure |
 | `gbrief-google` | `node:test` | fixture-driven digest shaping, **assertion that no body text appears in any output**, token refresh, API error handling |
-| `gbrief-winevents` | `node:test` | passthrough, timeout, structured error on unreachable collector |
+| `gbrief-winevents` | `node:test` | passthrough, timeout vs unreachable, malformed and wrong-typed payloads, non-Error rejection values |
 | Integration | manual | `openclaw mcp probe` both servers; `cron run` with delivery disabled before going live |
 
 ---
@@ -340,8 +463,11 @@ forwarder relies on.
 Each phase is independently useful and independently verifiable.
 
 1. **Windows events bridge** — collector, Pester tests, scheduled task, socat
-   forwarder, MCP shim. No external auth, so it is testable immediately and proves
-   the transport.
+   forwarder, MCP shim, and its registration (both the connector source and the
+   `mcp.servers` entry are reproduced by `deploy-connectors.ps1`). No external
+   auth, so it is testable immediately and proves the transport. **Proves the
+   transport only** — it does not make the brief work, because nothing in the
+   stack can yet call the tool.
 2. **Google connector** — gated on the user completing Google Cloud OAuth client
    setup, which can proceed in parallel with phase 1.
 3. **Brief rework** — prompt, tool scoping, 27B latency measurement, timeout,
@@ -351,5 +477,6 @@ Each phase is independently useful and independently verifiable.
 
 ## Open items for the user
 
-- Run the Event Log Readers command (supplied separately) and log off/on.
+- ~~Run the Event Log Readers command (supplied separately) and log off/on.~~
+  Done — `Security` now appears in `channelsRead`, not `channelsUnavailable`.
 - Create a Google Cloud project with a Desktop OAuth client before phase 2.
