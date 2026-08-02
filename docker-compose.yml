@@ -1,0 +1,91 @@
+services:
+  openclaw:
+    # PINNED BY DIGEST - do not switch back to :latest.
+    # 2026-07-21: `docker compose pull` moved :latest BACKWARD from 2026.7.1 to
+    # 2026.6.33. The older binary then refused to start, because the config in the
+    # volume had been written by a newer version:
+    #   "Refusing to run automatic gateway startup migrations because this
+    #    OpenClaw binary (2026.6.33) is older than the config last written by
+    #    OpenClaw 2026.7.1."
+    # This digest is 2026.7.1. To upgrade, resolve the intended version's digest
+    # explicitly and update this line - never float on a tag.
+    image: ghcr.io/openclaw/openclaw@sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c
+    container_name: openclaw
+    extra_hosts:
+      # Docker Engine (not Desktop) does not provide host.docker.internal automatically.
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - .env
+    environment:
+      - OPENCLAW_DISABLE_BONJOUR=1
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:?set ANTHROPIC_API_KEY in .env}
+      - OLLAMA_API_KEY=${OLLAMA_API_KEY:-ollama-local}
+      # gateway.auth.token is a SecretRef pointing at this var, so the token is
+      # no longer stored in plaintext in openclaw.json.
+      - OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN:?set OPENCLAW_GATEWAY_TOKEN in .env}
+    ports:
+      # Bind the HOST side to loopback only. A bare "18789:18789" publishes on
+      # 0.0.0.0 and exposes the gateway to the whole LAN. The gateway itself
+      # must use bind=all (not loopback) or the published port cannot reach it,
+      # so this host-side restriction is what keeps it private.
+      - "127.0.0.1:18789:18789"
+    volumes:
+      # Container runs as user `node` (uid 1000), so config lives under
+      # /home/node, NOT /root. Named volume rather than a /mnt/c bind mount:
+      # keeps config inside the WSL2 filesystem (fast, correct ownership).
+      - openclaw-config:/home/node/.openclaw
+    cap_drop:
+      - NET_RAW
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+  # Ollama runs on Windows bound to 127.0.0.1. Under WSL2 mirrored networking, WSL
+  # reaches Windows ONLY via shared loopback — the host's LAN IP does not work, and
+  # a bridge-network container cannot reach loopback at all. This forwarder sits in
+  # WSL's network namespace (so it can use 127.0.0.1) and re-publishes Ollama on the
+  # docker0 gateway, which bridge containers CAN reach.
+  #
+  # Listener is bound to 172.17.0.1 specifically, not 0.0.0.0 — under mirrored
+  # networking a wildcard bind would also expose it on the LAN.
+  #
+  # Note: network_mode host means this container shares WSL's namespace and can
+  # therefore reach dockerd on 127.0.0.1:2375. That is acceptable for a fixed-purpose
+  # socat forwarder; do NOT give the openclaw container itself host networking.
+  # connect-timeout=5 matters more than it looks. socat accepts the inbound
+  # connection FIRST, then dials upstream. When Ollama is down, a Windows
+  # loopback connect under mirrored networking does not get refused - it hangs
+  # and times out after ~130s. The caller therefore sees an established
+  # connection that never returns a byte, which OpenClaw classifies as a
+  # "model idle timeout" (~240s, zero tokens) instead of "Ollama is not running".
+  # That masked 4 straight silent failures of the Morning brief cron.
+  # 5s makes a dead upstream fail fast and honestly.
+  ollama-fwd:
+    image: alpine/socat
+    container_name: ollama-fwd
+    network_mode: host
+    command: TCP-LISTEN:11435,fork,reuseaddr,bind=172.17.0.1 TCP:127.0.0.1:11434,connect-timeout=5
+    restart: unless-stopped
+
+  # Signal bridge. MODE=json-rpc keeps a persistent signal-cli daemon per account,
+  # which is what makes the WebSocket receive endpoint (/v1/receive/<number>) work;
+  # MODE=normal spawns a short-lived process per request and cannot stream.
+  signal-cli:
+    image: bbernhard/signal-cli-rest-api:latest
+    container_name: signal-cli
+    environment:
+      - MODE=json-rpc
+    ports:
+      # Loopback-only on the host, same rationale as the gateway above. The
+      # openclaw container reaches this as http://signal-cli:8080 over the
+      # default compose network, not via the published port.
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # Holds the linked-device identity and keys. Losing this = re-linking.
+      - signal-cli-data:/home/.local/share/signal-cli
+    restart: unless-stopped
+
+volumes:
+  openclaw-config:
+  signal-cli-data:

@@ -1,0 +1,20 @@
+// Ollama provider block — already applied to the running instance.
+//
+// Apply with:
+//   docker compose exec openclaw node openclaw.mjs config patch --file <path> --dry-run
+//   docker compose exec openclaw node openclaw.mjs config patch --file <path>
+//
+// NOTE: a top-level {"ollama": {...}} block is NOT valid in 2026.7.1 and fails
+// schema validation. Providers live under models.providers.<id>.
+{
+  models: {
+    mode: "merge",
+    providers: {
+      ollama: {
+        baseUrl: "http://host.docker.internal:11434/v1",
+        apiKey: "ollama-local",
+        api: "openai-responses",
+      },
+    },
+  },
+}
