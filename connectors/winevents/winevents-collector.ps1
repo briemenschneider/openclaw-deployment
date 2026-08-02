@@ -170,7 +170,7 @@ function Start-WinEventsCollector {
         # Get-Content -Raw returns $null (not '') for a genuinely zero-byte
         # file, which would otherwise throw a confusing null-reference error
         # from .Trim() instead of the intended "token file is empty" message.
-        $rawToken = Get-Content $TokenPath -Raw
+        $rawToken = Get-Content $TokenPath -Raw -Encoding UTF8
         if ($null -eq $rawToken) { $rawToken = '' }
         $expectedToken = $rawToken.Trim()
         if ([string]::IsNullOrWhiteSpace($expectedToken)) { throw "token file is empty" }

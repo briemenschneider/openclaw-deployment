@@ -274,7 +274,7 @@ function Get-BriefDigest {
     $allowlistErrors = @()
     if (Test-Path $AllowlistPath) {
         try {
-            $parsed = Get-Content $AllowlistPath -Raw | ConvertFrom-Json
+            $parsed = Get-Content $AllowlistPath -Raw -Encoding UTF8 | ConvertFrom-Json
             if ($parsed.PSObject.Properties.Name -contains 'suppress') {
                 $suppressValue = $parsed.suppress
                 # Handle suppress being not an array at all

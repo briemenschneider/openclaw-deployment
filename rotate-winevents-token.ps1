@@ -102,12 +102,19 @@ Write-Host "generated a new token (sha256 $($tokenHash.Substring(0,12))...)"
 # WINEVENTS_TOKEN= lines in .env and the winner was whichever the parser
 # happened to take last.
 #
-# Rewritten as UTF-8 WITHOUT a BOM via .NET rather than Set-Content: .env
-# contains non-ASCII characters in a comment, and Windows PowerShell 5.1's
-# -Encoding utf8 emits a BOM, which docker compose would read as part of the
-# first variable name.
+# Both sides of this round-trip need to agree on encoding: .env contains
+# non-ASCII characters in a comment.
+#
+# Read side: without -Encoding, Windows PowerShell 5.1's Get-Content decodes
+# a BOM-less file using the ANSI code page, silently mangling those
+# characters. -Encoding UTF8 reads BOM-less UTF-8 correctly on both Windows
+# PowerShell 5.1 and pwsh 7.
+#
+# Write side: rewritten as UTF-8 WITHOUT a BOM via .NET rather than
+# Set-Content, because Windows PowerShell 5.1's -Encoding utf8 emits a BOM,
+# which docker compose would read as part of the first variable name.
 if (-not (Test-Path $envFile)) { throw ".env not found at $envFile - copy .env.example first" }
-$lines = @(Get-Content -LiteralPath $envFile)
+$lines = @(Get-Content -LiteralPath $envFile -Encoding UTF8)
 if (@($lines | Where-Object { $_ -match '^\s*WINEVENTS_TOKEN=' }).Count -gt 0) {
     $lines = $lines | ForEach-Object {
         if ($_ -match '^\s*WINEVENTS_TOKEN=') { "WINEVENTS_TOKEN=$token" } else { $_ }
@@ -116,7 +123,7 @@ if (@($lines | Where-Object { $_ -match '^\s*WINEVENTS_TOKEN=' }).Count -gt 0) {
     $lines += "WINEVENTS_TOKEN=$token"
 }
 [System.IO.File]::WriteAllLines($envFile, [string[]]$lines, (New-Object System.Text.UTF8Encoding($false)))
-$tokenLineCount = @(Get-Content -LiteralPath $envFile | Where-Object { $_ -match '^\s*WINEVENTS_TOKEN=' }).Count
+$tokenLineCount = @(Get-Content -LiteralPath $envFile -Encoding UTF8 | Where-Object { $_ -match '^\s*WINEVENTS_TOKEN=' }).Count
 if ($tokenLineCount -ne 1) { throw ".env now has $tokenLineCount WINEVENTS_TOKEN lines, expected exactly 1" }
 Write-Host "updated .env (exactly one WINEVENTS_TOKEN line)"
 
