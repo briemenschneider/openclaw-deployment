@@ -656,15 +656,35 @@ git commit -m "feat(winevents): add digest assembly with channel availability re
 - [ ] **Step 1: Generate the token and record it**
 
 ```powershell
-$tok = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Max 256) })
-New-Item -ItemType Directory -Force -Path "$env:LOCALAPPDATA\OpenClawBrief" | Out-Null
-$tokFile = "$env:LOCALAPPDATA\OpenClawBrief\winevents.token"
-Set-Content -Path $tokFile -Value $tok -NoNewline -Encoding ascii
-icacls $tokFile /inheritance:r /grant:r "$($env:USERNAME):(R)" | Out-Null
-"token written to $tokFile"
-Add-Content -Path .\.env -Value "WINEVENTS_TOKEN=$tok"
-"appended WINEVENTS_TOKEN to .env"
+.\rotate-winevents-token.ps1
 ```
+
+> **Superseded (final review).** The original snippet here was:
+>
+> ```powershell
+> $tok = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Max 256) })
+> ...
+> Add-Content -Path .\.env -Value "WINEVENTS_TOKEN=$tok"
+> ```
+>
+> Three problems, all of which `rotate-winevents-token.ps1` fixes:
+>
+> 1. **`Add-Content` appends.** Running it twice left `.env` with TWO
+>    `WINEVENTS_TOKEN=` lines and the effective value was whichever the parser
+>    took last. Rotation is exactly the case where it gets run twice.
+> 2. **It knew about two of the three copies.** The token also lives
+>    **cleartext** in `mcp.servers.gbrief-winevents.env.WINEVENTS_TOKEN` inside
+>    `openclaw.json`, because openclaw does not pass its own environment to the
+>    stdio MCP servers it spawns (measured — see the script's `.DESCRIPTION`).
+>    Following the old procedure left the shim sending a stale token and the
+>    chain returning 401, visible only inside a tool result nobody reads.
+> 3. **`Get-Random` is not a cryptographic RNG.**
+>
+> The script updates all three copies in the order that works (`.env` ->
+> recreate container -> re-register MCP server -> token file -> restart
+> collector), verifies by SHA-256 digest that the container really reloaded,
+> and proves the chain answers 200 from both sides — without printing the
+> value.
 
 Verify `.env` is still ignored — it must never be staged:
 
@@ -1627,6 +1647,15 @@ docker exec openclaw sh -lc 'cd /opt/connectors/gbrief-winevents && npm install 
 Expected: 5 tests pass.
 
 - [ ] **Step 4: Register the MCP server**
+
+> **Superseded (final review): registration is now part of
+> `deploy-connectors.ps1`**, which adds the server if absent and leaves an
+> existing entry alone. Run that instead of the commands below; they are kept
+> for reference because they document what the script does. Registration used
+> to be a hand-run command persisted only inside the `openclaw-config` Docker
+> volume — so a fresh machine, or a lost volume, produced a container with the
+> connector files present and no tool registered, and nothing said so. This
+> branch made the connectors volume reproducible on exactly that argument.
 
 `$WINEVENTS_TOKEN` is expanded *inside* the container, not on Windows — the
 container picked it up from `.env` via `env_file` when Task 5 recreated it. This

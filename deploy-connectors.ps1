@@ -97,8 +97,17 @@ function Test-McpServerRegistered {
       failure to report.
     #>
     param([Parameter(Mandatory)][string]$Name)
-    & wsl -e docker exec openclaw openclaw mcp show $Name 2>&1 | Out-Null
-    return ($LASTEXITCODE -eq 0)
+    # $ErrorActionPreference is relaxed for the duration of the call: under
+    # 'Stop', Windows PowerShell 5.1 turns a native command's stderr output
+    # into a terminating NativeCommandError - and "No MCP server named ..." on
+    # stderr is the ANSWER here, not a failure.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & wsl -e docker exec openclaw openclaw mcp show $Name 2>&1 | Out-Null
+        return ($LASTEXITCODE -eq 0)
+    }
+    finally { $ErrorActionPreference = $previous }
 }
 
 $connectors = @('gbrief-winevents')
