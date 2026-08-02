@@ -3,3 +3,6 @@
 !.env.example
 backups/
 *.local
+
+# Subagent-driven-development scratch: ledgers, task briefs, review packages.
+.superpowers/
