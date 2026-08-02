@@ -213,13 +213,42 @@ payload. Not guessed. Measurement is a task in the implementation plan.
 default is `tools.profile: coding`, which grants exec and write; an unattended job
 that ingests external content must not inherit that.
 
-> **Unverified assumption — verify first in phase 3.** `cron edit --tools`
-> documents its values as bare names (`exec,read,write`). Whether it accepts
-> MCP-provided tool names, and under what namespacing, has not been confirmed —
-> no MCP server is configured yet to test against. If `--tools` cannot scope MCP
-> tools, the fallback is a dedicated agent for this job with its own restricted
-> `tools.profile` and `mcp` include-list, pointed at the 27B. The security
-> property is non-negotiable; only the mechanism is open.
+> **Verified 2026-08-02 (task 7), against a disabled throwaway cron job, not the
+> live Morning brief job.** `gbrief-winevents` is registered and probes as
+> `gbrief-winevents__windows_events_digest` (server name + `__` + tool name).
+> Three values were tried with `cron edit --tools`:
+>
+> | value tried                                   | result                                    |
+> |------------------------------------------------|-------------------------------------------|
+> | `windows_events_digest` (bare)                  | accepted, stored verbatim                  |
+> | `gbrief-winevents__windows_events_digest` (namespaced) | accepted, stored verbatim           |
+> | `this_tool_does_not_exist` (garbage)             | accepted, stored verbatim                  |
+>
+> Every value landed unchanged in `payload.toolsAllow` (confirmed via `cron get`
+> immediately after each edit). **`cron edit --tools` does no validation at
+> edit time** — it does not check the string against the live tool registry,
+> does not reject unknown names, and does not rewrite a bare name to its
+> namespaced form (or vice versa). It is a pass-through string list.
+>
+> This means the CLI cannot tell us, at configuration time, whether a given
+> `--tools` value will actually restrict anything when the job runs — that
+> depends on how the *runtime* enforcement matches `toolsAllow` entries against
+> the namespaced tool ids the agent actually sees (`server__tool`). That match
+> was deliberately **not** tested live: the throwaway job's `delivery.mode` was
+> `announce` to `channel: last`, and actually running it (`cron run`) risks a
+> real message delivery, which is out of bounds for a phase-1 experiment. So
+> the enforcement question is answered at the config layer but still open at
+> the runtime layer.
+>
+> **Consequence for phase 3:** given edit-time acceptance of a garbage tool
+> name, `--tools` cannot be trusted as a security boundary without a live-fire
+> test against a real (non-disabled, non-Morning-brief) job first, checking
+> that a tool *not* in the allow-list is actually refused at call time — not
+> just absent from the CLI's complaints. Until that live-fire test happens,
+> phase 3 should default to the dedicated-agent fallback (its own restricted
+> `tools.profile` and `mcp` include-list, pointed at the 27B) as the enforced
+> boundary, and treat `--tools` as, at best, defense-in-depth on top of it
+> rather than the sole control.
 
 **Prompt:** rewritten to be explicit and structured — state the role, name each
 tool to call, define the output sections, and instruct that connector output is
