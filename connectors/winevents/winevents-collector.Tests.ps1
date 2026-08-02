@@ -84,6 +84,83 @@ Describe 'Test-TokenEqual' {
     }
 }
 
+Describe 'Write-HttpResponseBody' {
+    BeforeAll {
+        # A fake HttpListenerResponse. Only the three members the function
+        # touches are modelled: ContentLength64, OutputStream.Write, and
+        # Close. Defined in BeforeAll, not in the Describe body - the body runs
+        # during Pester's discovery phase and its functions are gone by run
+        # time.
+        function New-FakeResponse {
+            param([switch]$WriteThrows, [switch]$CloseThrows)
+
+            $state = [pscustomobject]@{
+                Closed       = 0
+                BytesWritten = $null
+            }
+
+            $stream = [pscustomobject]@{ State = $state; Fail = [bool]$WriteThrows }
+            $stream | Add-Member -MemberType ScriptMethod -Name Write -Value {
+                param($buffer, $offset, $count)
+                if ($this.Fail) { throw 'An operation was attempted on a nonexistent network connection' }
+                $this.State.BytesWritten = $buffer[$offset..($offset + $count - 1)]
+            }
+
+            $res = [pscustomobject]@{
+                ContentLength64 = 0
+                OutputStream    = $stream
+                State           = $state
+                FailClose       = [bool]$CloseThrows
+            }
+            $res | Add-Member -MemberType ScriptMethod -Name Close -Value {
+                $this.State.Closed++
+                if ($this.FailClose) { throw 'The specified network name is no longer available' }
+            }
+            return $res
+        }
+    }
+
+    It 'writes the body and closes the response on the happy path' {
+        $res = New-FakeResponse
+        $failure = Write-HttpResponseBody -Response $res -Body '{"ok":true}'
+        $failure               | Should -BeNullOrEmpty
+        $res.State.Closed      | Should -Be 1
+        $res.ContentLength64   | Should -Be 11
+        [System.Text.Encoding]::UTF8.GetString([byte[]]$res.State.BytesWritten) | Should -Be '{"ok":true}'
+    }
+
+    It 'still closes the response when the write throws' {
+        # The regression this exists for: the design treats a mid-response
+        # client disconnect as ROUTINE, and a Close() placed after the Write()
+        # in the same try block is skipped on exactly that path - leaking an
+        # unterminated HttpListenerResponse every time it happens, in a process
+        # meant to run for months.
+        $res = New-FakeResponse -WriteThrows
+        $failure = Write-HttpResponseBody -Response $res -Body '{"ok":true}'
+        $failure          | Should -Match 'nonexistent network connection'
+        $res.State.Closed | Should -Be 1
+    }
+
+    It 'does not throw when both the write and the close fail' {
+        $res = New-FakeResponse -WriteThrows -CloseThrows
+        # A hashtable, not a plain variable: Should -Not -Throw runs the
+        # scriptblock in its own scope, so a plain assignment would not reach
+        # this one.
+        $captured = @{}
+        { $captured.failure = Write-HttpResponseBody -Response $res -Body 'x' } | Should -Not -Throw
+        # The write failure is the more informative of the two, so it wins.
+        $captured.failure | Should -Match 'nonexistent network connection'
+        $res.State.Closed | Should -Be 1
+    }
+
+    It 'reports a close failure that follows a successful write' {
+        $res = New-FakeResponse -CloseThrows
+        $captured = @{}
+        { $captured.failure = Write-HttpResponseBody -Response $res -Body 'x' } | Should -Not -Throw
+        $captured.failure | Should -Match 'close failed'
+    }
+}
+
 Describe 'Start-WinEventsCollector exit code contract' {
     # These two paths both throw before the listener is ever created (the
     # token file is validated first), so they are testable in-process

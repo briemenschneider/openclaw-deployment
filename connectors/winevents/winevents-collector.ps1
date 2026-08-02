@@ -74,6 +74,51 @@ function New-ErrorJson {
     return (@{ error = $clean } | ConvertTo-Json -Compress)
 }
 
+function Write-HttpResponseBody {
+    <#
+    .SYNOPSIS
+      Send a response body and release the response, whether or not the send
+      succeeded. Never throws.
+    .DESCRIPTION
+      Returns $null on success, or a message describing what went wrong.
+
+      The Close() MUST be in a finally. A client that disconnected mid-response
+      (forwarder restart, timed-out curl on the container side) makes Write()
+      throw, and this design explicitly treats that as ROUTINE - so a Close()
+      placed after the Write() inside the same try block is skipped on exactly
+      the path that happens most often, leaking an unterminated
+      HttpListenerResponse each time. In a process meant to stay up for months
+      that is a slow resource leak with no symptom until it bites.
+
+      HttpListenerResponse.Close() closes the output stream itself, so one call
+      covers both. It can also throw on an already-broken connection, hence the
+      inner try/catch - but a Close() failure is still reported to the caller
+      rather than swallowed, unless a Write() failure already explains it.
+    #>
+    param(
+        [Parameter(Mandatory)][object]$Response,
+        [string]$Body
+    )
+
+    $failure = $null
+    try {
+        $buf = [System.Text.Encoding]::UTF8.GetBytes($Body)
+        $Response.ContentLength64 = $buf.Length
+        $Response.OutputStream.Write($buf, 0, $buf.Length)
+    }
+    catch {
+        $failure = $_.Exception.Message
+    }
+    finally {
+        try { $Response.Close() }
+        catch {
+            if ($null -eq $failure) { $failure = "close failed: $($_.Exception.Message)" }
+        }
+    }
+
+    return $failure
+}
+
 function Start-WinEventsCollector {
     <#
     .SYNOPSIS
@@ -235,15 +280,11 @@ function Start-WinEventsCollector {
             # timed-out curl on the container side) makes Write()/Close()
             # throw. That is expected, not fatal - log it and move on to the
             # next request rather than letting it escape the loop and take
-            # the whole listener down.
-            try {
-                $buf = [System.Text.Encoding]::UTF8.GetBytes($body)
-                $res.ContentLength64 = $buf.Length
-                $res.OutputStream.Write($buf, 0, $buf.Length)
-                $res.OutputStream.Close()
-            }
-            catch {
-                Write-Log "response write failed for $($req.Url.AbsolutePath) (client likely disconnected): $($_.Exception.Message)"
+            # the whole listener down. Write-HttpResponseBody never throws and
+            # always closes the response; see its .DESCRIPTION.
+            $writeFailure = Write-HttpResponseBody -Response $res -Body $body
+            if ($null -ne $writeFailure) {
+                Write-Log "response write failed for $($req.Url.AbsolutePath) (client likely disconnected): $writeFailure"
             }
         }
     }
