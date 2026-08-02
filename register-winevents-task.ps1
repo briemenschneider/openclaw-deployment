@@ -30,9 +30,10 @@
        Task Scheduler's control) stays dead until something triggers again.
        The morning brief cron fires at 07:15 Europe/Berlin and needs the
        collector alive; this trigger fires ten minutes earlier so a dead
-       collector is restarted in time regardless of when it died. The
-       machine's local timezone is already Europe/Berlin, so 07:05 local
-       needs no conversion.
+       collector is restarted in time regardless of when it died. 07:05
+       local needs no conversion only because the machine's timezone is
+       Europe/Berlin - which this script now asserts before registering
+       anything, rather than assuming (see the timezone check below).
 
        This trigger is cheap to fire twice in a row (e.g. logon + 07:05
        landing close together) NOT because the collector script is
@@ -61,6 +62,34 @@ $taskName = 'OpenClaw - winevents collector'
 $script   = Join-Path $PSScriptRoot 'connectors\winevents\winevents-collector.ps1'
 
 if (-not (Test-Path $script)) { throw "collector not found at $script" }
+
+# The 07:05 daily trigger below is expressed in LOCAL time, and its only
+# purpose is to land ten minutes before the morning-brief cron, which is
+# scheduled in Europe/Berlin. That ten-minute relationship is a silent
+# assumption about the machine's timezone: on a machine set to anything else,
+# this script would still register happily and the task would still report
+# State=Running, but it would fire at the wrong time relative to the cron -
+# possibly AFTER it - and the only symptom would be an occasionally empty
+# brief. Assert it here rather than discover it in production.
+#
+# 'W. Europe Standard Time' is the Windows id for the Europe/Berlin zone (it
+# covers Berlin, Amsterdam, Rome, Vienna, Stockholm - all the same UTC+1/+2
+# offsets and the same DST rules, which is the granularity that matters here).
+#
+# Scope note: this is about the trigger-vs-cron relationship ONLY. The digest's
+# lookback window is not timezone-dependent - WinEventsCore.psm1 normalizes
+# every comparison to UTC (see Select-BriefEvent's .DESCRIPTION) - so a machine
+# in the wrong zone gets a correct 24 hours of events, just delivered at the
+# wrong moment.
+$expectedTimeZoneId = 'W. Europe Standard Time'
+$actualTimeZoneId   = [System.TimeZoneInfo]::Local.Id
+if ($actualTimeZoneId -ne $expectedTimeZoneId) {
+    throw ("machine timezone is '$actualTimeZoneId', expected '$expectedTimeZoneId' (Europe/Berlin). " +
+           "The 07:05 daily trigger registered by this script is local time and must land 10 minutes " +
+           "before the 07:15 Europe/Berlin morning-brief cron. Either set the machine timezone, or " +
+           "edit BOTH `$expectedTimeZoneId and the 07:05 trigger below to the correct local time for " +
+           "07:05 Europe/Berlin - do not just delete this check.")
+}
 
 # Execute is the stable, never-version-pinned Windows PowerShell 5.1 binary
 # (a core OS component under System32 - it never moves and is never
