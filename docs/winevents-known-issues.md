@@ -97,6 +97,28 @@ bootstrapTotalMaxChars: 1000
 -> toolSummary: [{ calls: 1, tools: ["gbrief-winevents__windows_events_digest"], failures: 0 }]
 ```
 
+**Ollama's real context is 4096 unless you say otherwise, and that silently
+truncated the brief.** The provider config declared `contextWindow: 262144`, but
+`ollama ps` reported `CONTEXT 4096` — Ollama's default — because OpenClaw sends
+`"options":{}` with no `num_ctx`. The cron turn's ~6,000-token input therefore
+overflowed the real window, leaving no room to generate: Ollama returned
+`done_reason: "length"` after ~112 output tokens and the job failed with "Agent
+couldn't generate a response". It was invisible from OpenClaw's side, which reported
+only `stopReason=length`; a `socat -v` tap on the provider connection is what showed
+Ollama's own verdict. Direct agent runs slipped under the limit and worked, which
+made it look cron-specific. Fixed by declaring both, and keeping them equal so
+OpenClaw budgets context against the window that actually exists:
+
+```
+params:        { num_ctx: 16384 }
+contextWindow: 16384
+maxTokens:     8192
+```
+
+**The morning brief now works end to end** — `status: ok`, delivered to Telegram in
+23s, all three sections grounded in real events, and `sanitizedCount` correctly
+surfaced in the report ("two fields/data items were truncated during sanitization").
+
 **The trade-off is real and worth stating.** An agent configured this way has no
 bootstrap files, no skills, and no injected identity — it is a narrow specialist,
 not a general assistant. That suits the morning brief, which does one job. It would
