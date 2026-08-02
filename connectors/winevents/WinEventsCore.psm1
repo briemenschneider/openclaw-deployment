@@ -81,6 +81,15 @@ function Select-ValidAllowlistEntry {
             $reason = 'provider is empty'
         } elseif (-not $hasId) {
             $reason = 'missing id'
+        } elseif ($null -eq $idValue -or $idValue -is [bool]) {
+            # These are the two JSON id types that coerce SILENTLY: [int]$null
+            # is 0 and [int]$true is 1, neither throws. Without this branch,
+            # {"provider":"foo","id":null} is accepted as a valid suppression
+            # rule for event id 0, matches nothing, and is reported nowhere -
+            # the user believes suppression is active while it quietly does
+            # nothing, which is precisely the degradation allowlistErrors
+            # exists to surface. Reject with a reason instead.
+            $reason = if ($null -eq $idValue) { 'id is null' } else { 'id is a boolean, not a number' }
         } else {
             # Try to coerce id to int safely
             $idInt = $null

@@ -361,6 +361,36 @@ Describe 'Select-ValidAllowlistEntry' {
         $result.Errors[0].reason | Should -Match 'missing provider'
     }
 
+    It 'rejects an entry with an explicit null id' {
+        # [int]$null is 0 and does not throw, so without an explicit guard this
+        # entry is ACCEPTED as a suppression rule for event id 0, matches
+        # nothing, and never appears in allowlistErrors - the user believes
+        # suppression is active while it silently does nothing.
+        $raw = @([pscustomobject]@{ provider = 'foo'; id = $null })
+        $result = Select-ValidAllowlistEntry -Raw $raw
+        $result.Valid.Count      | Should -Be 0
+        $result.Errors.Count     | Should -Be 1
+        $result.Errors[0].reason | Should -Match 'null'
+    }
+
+    It 'rejects an id that arrived as JSON null' {
+        $raw = @(('{"suppress":[{"provider":"foo","id":null}]}' | ConvertFrom-Json).suppress)
+        $result = Select-ValidAllowlistEntry -Raw $raw
+        $result.Valid.Count      | Should -Be 0
+        $result.Errors.Count     | Should -Be 1
+        $result.Errors[0].reason | Should -Match 'null'
+    }
+
+    It 'rejects a boolean id' {
+        # [int]$true is 1 and does not throw either - same silent-acceptance
+        # trap as null, one event id along.
+        $raw = @([pscustomobject]@{ provider = 'foo'; id = $true })
+        $result = Select-ValidAllowlistEntry -Raw $raw
+        $result.Valid.Count      | Should -Be 0
+        $result.Errors.Count     | Should -Be 1
+        $result.Errors[0].reason | Should -Match 'boolean'
+    }
+
     It 'rejects a bare string in the array' {
         $raw = @('bare string')
         $result = Select-ValidAllowlistEntry -Raw $raw
@@ -420,6 +450,14 @@ Describe 'Get-BriefDigest' {
         $tmpFile = [System.IO.Path]::GetTempFileName()
         @{ suppress = [pscustomobject]@{ provider = 'test'; id = 123 } } | ConvertTo-Json | Set-Content $tmpFile
         { $d = Get-BriefDigest -AllowlistPath $tmpFile } | Should -Not -Throw
+        Remove-Item $tmpFile -Force
+    }
+
+    It 'reports a null-id allowlist entry in allowlistErrors instead of silently accepting it' {
+        $tmpFile = [System.IO.Path]::GetTempFileName()
+        '{"suppress":[{"provider":"TestProvider000","id":null}]}' | Set-Content $tmpFile -Encoding ASCII
+        $d = Get-BriefDigest -WindowHours 1 -AllowlistPath $tmpFile
+        @($d.allowlistErrors | Where-Object { $_.reason -match 'null' }).Count | Should -Be 1
         Remove-Item $tmpFile -Force
     }
 
