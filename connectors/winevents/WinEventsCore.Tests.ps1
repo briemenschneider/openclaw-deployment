@@ -144,3 +144,51 @@ Describe 'Select-BriefEvent' {
         }
     }
 }
+
+Describe 'Get-NormalizedEvent' {
+    It 'maps a Get-WinEvent-shaped record to the normalized shape' {
+        $raw = [pscustomobject]@{
+            ProviderName = 'disk'
+            Id           = 51
+            Level        = 2
+            TimeCreated  = [datetime]'2026-08-02T04:00:00Z'
+            Message      = 'disk error'
+        }
+        $n = Get-NormalizedEvent -Raw $raw -Channel 'System'
+        $n.Channel      | Should -Be 'System'
+        $n.ProviderName | Should -Be 'disk'
+        $n.Id           | Should -Be 51
+        $n.Level        | Should -Be 2
+        $n.Message      | Should -Be 'disk error'
+    }
+
+    It 'substitutes an empty string for a null message' {
+        $raw = [pscustomobject]@{
+            ProviderName = 'disk'; Id = 51; Level = 2
+            TimeCreated  = [datetime]'2026-08-02T04:00:00Z'
+            Message      = $null
+        }
+        $n = Get-NormalizedEvent -Raw $raw -Channel 'System'
+        $n.Message | Should -Be ''
+    }
+}
+
+Describe 'Get-BriefDigest' {
+    It 'reports the channels it could read against a live machine' {
+        $d = Get-BriefDigest -WindowHours 24
+        $d.channelsRead         | Should -Not -BeNullOrEmpty
+        $d.channelsRead         | Should -Contain 'System'
+        $d.windowHours          | Should -Be 24
+        $d.generatedAt          | Should -Match 'Z$'
+        $d.PSObject.Properties.Name | Should -Contain 'channelsUnavailable'
+        $d.PSObject.Properties.Name | Should -Contain 'events'
+    }
+
+    It 'records Security under channelsUnavailable when it cannot be read' {
+        $d = Get-BriefDigest -WindowHours 24
+        $secReadable = $d.channelsRead -contains 'Security'
+        $secListedUnavailable = @($d.channelsUnavailable | Where-Object { $_.channel -eq 'Security' }).Count -gt 0
+        # Exactly one must be true - Security is never silently absent.
+        ($secReadable -bxor $secListedUnavailable) | Should -BeTrue
+    }
+}

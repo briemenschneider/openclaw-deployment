@@ -1,0 +1,4 @@
+{
+  "comment": "Suppress known-benign recurring events. Match is provider + id. Add entries only after confirming the event is genuinely benign on this machine.",
+  "suppress": []
+}

@@ -86,4 +86,82 @@ function Select-BriefEvent {
     }
 }
 
-Export-ModuleMember -Function Select-BriefEvent, Get-LevelName
+function Get-NormalizedEvent {
+    param(
+        [Parameter(Mandatory)][object]$Raw,
+        [Parameter(Mandatory)][string]$Channel
+    )
+    $msg = $Raw.Message
+    if ($null -eq $msg) { $msg = '' }
+    [pscustomobject]@{
+        Channel      = $Channel
+        ProviderName = $Raw.ProviderName
+        Id           = [int]$Raw.Id
+        Level        = [int]$Raw.Level
+        TimeCreated  = $Raw.TimeCreated
+        Message      = $msg
+    }
+}
+
+function Get-BriefDigest {
+    <#
+    .SYNOPSIS
+      Query every configured channel, filter, and assemble the digest payload.
+    #>
+    param(
+        [int]$WindowHours = 24,
+        [string]$AllowlistPath = "$PSScriptRoot\winevents-allowlist.json"
+    )
+
+    $now    = [datetime]::UtcNow
+    $cutoff = $now.AddHours(-$WindowHours)
+
+    $allowlist = @()
+    if (Test-Path $AllowlistPath) {
+        $parsed = Get-Content $AllowlistPath -Raw | ConvertFrom-Json
+        if ($parsed.PSObject.Properties.Name -contains 'suppress') {
+            $allowlist = @($parsed.suppress)
+        }
+    }
+
+    $read        = [System.Collections.Generic.List[string]]::new()
+    $unavailable = [System.Collections.Generic.List[object]]::new()
+    $normalized  = [System.Collections.Generic.List[object]]::new()
+
+    foreach ($short in $script:ChannelMap.Keys) {
+        $logName = $script:ChannelMap[$short]
+        $raw = $null
+        try {
+            $raw = @(Get-WinEvent -FilterHashtable @{ LogName = $logName; StartTime = $cutoff } -ErrorAction Stop)
+        }
+        catch {
+            # Get-WinEvent raises a terminating error rather than returning empty
+            # when nothing matches. That is a successful read of an empty window,
+            # not an unavailable channel.
+            if ($_.Exception.Message -like '*No events were found*') {
+                $read.Add($short)
+                continue
+            }
+            $unavailable.Add([pscustomobject]@{
+                channel = $short
+                reason  = $_.Exception.Message.Split([char]10)[0].Trim()
+            })
+            continue
+        }
+
+        $read.Add($short)
+        foreach ($r in $raw) {
+            $normalized.Add((Get-NormalizedEvent -Raw $r -Channel $short))
+        }
+    }
+
+    [pscustomobject]@{
+        generatedAt         = $now.ToString('o')
+        windowHours         = $WindowHours
+        channelsRead        = @($read)
+        channelsUnavailable = @($unavailable)
+        events              = @(Select-BriefEvent -Events @($normalized) -Now $now -WindowHours $WindowHours -Allowlist $allowlist)
+    }
+}
+
+Export-ModuleMember -Function Select-BriefEvent, Get-LevelName, Get-NormalizedEvent, Get-BriefDigest
