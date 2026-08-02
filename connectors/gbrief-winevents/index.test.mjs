@@ -67,6 +67,26 @@ test('fetchDigest returns a structured error when the parsed body is an array', 
   assert.match(r.error, /array/);
 });
 
+test('fetchDigest survives a non-Error thrown value', async () => {
+  // `throw 'boom'` is legal JS and some transports reject with strings or
+  // plain objects. Reading .message off null/undefined throws, which would
+  // escape the catch and turn a structured error into an MCP protocol error -
+  // breaking the shim's never-throw contract.
+  for (const thrown of ['boom', null, undefined, 42, { code: 'ENOTFOUND' }]) {
+    const stub = async () => { throw thrown; };
+    const r = await fetchDigest('http://c:18791', 'tok', 24, stub);
+    assert.equal(r.ok, false, `thrown value ${String(thrown)} should yield a structured error`);
+    assert.match(r.error, /unreachable/);
+  }
+});
+
+test('fetchDigest includes the thrown string in the error when it is not an Error', async () => {
+  const stub = async () => { throw 'connect ECONNREFUSED bare string'; };
+  const r = await fetchDigest('http://c:18791', 'tok', 24, stub);
+  assert.equal(r.ok, false);
+  assert.match(r.error, /connect ECONNREFUSED bare string/);
+});
+
 test('fetchDigest reports a timeout distinctly from an unreachable collector', async () => {
   const stub = async () => {
     const err = new Error('The operation was aborted due to timeout');

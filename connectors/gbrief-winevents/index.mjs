@@ -11,6 +11,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
+import { pathToFileURL } from 'node:url';
 
 const BASE_URL = process.env.WINEVENTS_URL ?? 'http://host.docker.internal:18791';
 const TOKEN = process.env.WINEVENTS_TOKEN ?? '';
@@ -42,7 +43,13 @@ export async function fetchDigest(baseUrl, token, hours, fetchImpl = fetch) {
     if (err && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
       return { ok: false, error: `collector timed out after ${TIMEOUT_MS / 1000}s` };
     }
-    return { ok: false, error: `collector unreachable: ${err.message}` };
+    // A thrown value is not guaranteed to be an Error - `throw 'boom'` is legal
+    // and some transports reject with strings or plain objects. Reading
+    // .message off a bare string yields undefined (harmless), but off null or
+    // undefined it THROWS, which would escape this catch, break the shim's
+    // never-throw contract, and turn a structured error the brief can report
+    // into an opaque MCP protocol error. Coerce instead.
+    return { ok: false, error: `collector unreachable: ${String(err?.message ?? err)}` };
   }
 
   if (!res.ok) {
@@ -97,6 +104,16 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 });
 
 // Only connect stdio when run as the entrypoint, so tests can import cleanly.
-if (process.argv[1] && process.argv[1].endsWith('index.mjs')) {
+//
+// This is an exact module-identity check, not a filename suffix match. The
+// suffix form (`process.argv[1].endsWith('index.mjs')`) fails open in the
+// wrong direction: if it ever stops matching - a symlinked or renamed
+// entrypoint, a bundler, a launcher that passes a different argv[1] - the
+// process starts, registers no transport, has nothing to wait on, and exits 0.
+// A silent start failure reported as success is the exact failure mode this
+// whole branch exists to eliminate. Comparing import.meta.url against the
+// resolved argv[1] URL is true when and only when this module IS the
+// entrypoint.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   await server.connect(new StdioServerTransport());
 }
