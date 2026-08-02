@@ -1,4 +1,31 @@
 services:
+  # One-shot fix for openclaw-connectors' default ownership. A fresh named
+  # volume comes up root:root - Docker does not chown it to match the
+  # mounting container's user, regardless of that image's USER directive.
+  # Without this, /opt/connectors is unwritable by uid 1000 (node) until
+  # someone manually chowns it, which is an untracked fix that silently
+  # breaks on the next volume recreation (new machine, disaster recovery,
+  # `docker volume rm`). Runs once, fixes ownership, exits 0; openclaw is
+  # gated on that exit via depends_on/condition below so this is not a
+  # step anyone can forget.
+  #
+  # restart: "no" so it does not loop after completing - it is not a
+  # long-running service. chown -R on an already-correct tree is a no-op,
+  # so re-running this on every `docker compose up -d` is harmless.
+  #
+  # This does couple openclaw's startup to this container succeeding. That
+  # coupling is intentional: a loud startup failure here is preferable to
+  # a silent "connectors unwritable" failure discovered later, and chown
+  # on an already-mounted volume has very little that can go wrong once
+  # the image is pulled - which it is, locally cached, after first run.
+  connectors-init:
+    image: alpine:3.20
+    container_name: connectors-init
+    command: ["chown", "-R", "1000:1000", "/opt/connectors"]
+    volumes:
+      - openclaw-connectors:/opt/connectors
+    restart: "no"
+
   openclaw:
     # PINNED BY DIGEST - do not switch back to :latest.
     # 2026-07-21: `docker compose pull` moved :latest BACKWARD from 2026.7.1 to
@@ -35,14 +62,20 @@ services:
       # keeps config inside the WSL2 filesystem (fast, correct ownership).
       - openclaw-config:/home/node/.openclaw
       # Connector source, deployed by deploy-connectors.ps1. A named volume
-      # rather than a /mnt/c bind: keeps node_modules on the WSL filesystem with
-      # correct uid-1000 ownership. Git remains the source of truth.
+      # rather than a /mnt/c bind: keeps node_modules on the WSL filesystem.
+      # NOT correct ownership out of the box - a fresh named volume comes up
+      # root:root regardless of this container's user, which is unwritable by
+      # uid 1000. The connectors-init service below chowns it before openclaw
+      # is allowed to start; see depends_on.
       - openclaw-connectors:/opt/connectors
     cap_drop:
       - NET_RAW
       - NET_ADMIN
     security_opt:
       - no-new-privileges:true
+    depends_on:
+      connectors-init:
+        condition: service_completed_successfully
     restart: unless-stopped
 
   # Ollama runs on Windows bound to 127.0.0.1. Under WSL2 mirrored networking, WSL
