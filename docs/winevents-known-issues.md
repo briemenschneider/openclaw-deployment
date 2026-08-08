@@ -110,10 +110,23 @@ made it look cron-specific. Fixed by declaring both, and keeping them equal so
 OpenClaw budgets context against the window that actually exists:
 
 ```
-params:        { num_ctx: 16384 }
-contextWindow: 16384
-maxTokens:     8192
+qwen3.5:9b    params: { num_ctx: 65536 }   contextWindow: 65536   maxTokens: 8192
+qwen3.6:27b   params: { num_ctx: 32768 }   contextWindow: 32768   maxTokens: 8192
+agents.defaults.compaction.reserveTokensFloor: 12000
 ```
+
+**Sizing rule — get this wrong and every turn fails, not just long ones.** The window
+must hold `agent baseline + compaction reserve + room to answer`. A full-context agent
+here has a **~12,785-token baseline** (measured on `main`: system prompt, bootstrap
+files, skills, tool schemas) before the user types anything. A first attempt at
+`contextWindow: 16384` therefore broke `main` completely — a brand-new conversation
+saying "Are you active?" failed with *"Auto-compaction could not recover this turn"*,
+because the baseline plus the reserve exceeded the window on turn one. Note the error's
+own advice (`reserveTokensFloor` >= 20000) is unachievable inside a 16,384 window; the
+reserve only needs to comfortably exceed `maxTokens`. Measured KV cost on the 9B is
+about 40 MB per 1K tokens (5.5 GB at 4K, 6.0 at 16K, 6.6 at 32K, 7.6 at 64K), so 64K
+still fits entirely on a 12 GiB GPU. The 27B is held lower because it already spills
+past the GPU. `briefer` needs far less (~2.5K baseline) because its context is trimmed.
 
 **The morning brief now works end to end** — `status: ok`, delivered to Telegram in
 23s, all three sections grounded in real events, and `sanitizedCount` correctly
