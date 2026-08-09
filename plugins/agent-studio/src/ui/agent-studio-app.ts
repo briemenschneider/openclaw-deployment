@@ -55,6 +55,13 @@ export class AgentStudioApp extends LitElement {
     }
   }
 
+  reactivate(): void {
+    if (this.mounted || !this.isConnected) return;
+    this.mounted = true;
+    this.lifecycleGeneration += 1;
+    this.clearLocalConnection();
+  }
+
   protected createRenderRoot(): HTMLElement {
     return this;
   }

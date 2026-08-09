@@ -143,12 +143,23 @@ describe("built panel in a real scripts-only browser frame", () => {
       await panel.evaluate<void>("document.querySelector('#directory-toggle').click()");
       expect(await panel.evaluate<boolean>("document.querySelector('#agent-directory').hasAttribute('data-open')")).toBe(true);
 
-      await page.evaluate<void>("document.querySelector('iframe').remove()");
+      await panel.evaluate<void>("dispatchEvent(new Event('pagehide'))");
       await expect.poll(() => requests.length).toBe(2);
+      expect(requests.at(-1)).toEqual({ action: "disconnect" });
+      await panel.evaluate<void>("dispatchEvent(new Event('pageshow'))");
+      await expect.poll(async () => await panel?.evaluate<boolean>("Boolean(document.querySelector('#gateway-token'))")).toBe(true);
+      await panel.evaluate<void>(
+        "(() => { const input = document.querySelector('#gateway-token'); input.value = 'browser-only-token'; document.querySelector('.primary-action').click(); })()",
+      );
+      await expect.poll(() => requests.length).toBe(3);
+      await expect.poll(async () => await panel?.evaluate<boolean>("Boolean(document.querySelector('#disconnect'))")).toBe(true);
+
+      await page.evaluate<void>("document.querySelector('iframe').remove()");
+      await expect.poll(() => requests.length).toBe(4);
       expect(requests.at(-1)).toEqual({ action: "disconnect" });
     } finally {
       await page.close();
       await browser.close();
     }
-  });
+  }, 15_000);
 });

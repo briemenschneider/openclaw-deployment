@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentStudioApp, AgentStudioApi } from "../../src/ui/agent-studio-app.js";
 
 const connectionId = "d".repeat(64);
+const restoredConnectionId = "e".repeat(64);
 const features = {
   listAgents: true,
   updateAgent: false,
@@ -81,5 +82,66 @@ describe("Agent Studio document lifecycle", () => {
     expect(app.features).toBeUndefined();
     app.remove();
     expect(disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("reactivates after pageshow and cleans the restored connection on a second pagehide", async () => {
+    let connectCalls = 0;
+    const disconnect = vi.fn(async () => undefined);
+    const app = await mountMain({
+      connect: async () => ({
+        connectionId: connectCalls++ === 0 ? connectionId : restoredConnectionId,
+        features,
+      }),
+      disconnect,
+    });
+    connect(app);
+    await vi.waitFor(() => expect(app.connectionId).toBe(connectionId));
+    window.dispatchEvent(new Event("pagehide"));
+    await vi.waitFor(() => expect(disconnect).toHaveBeenCalledTimes(1));
+
+    window.dispatchEvent(new Event("pageshow"));
+    window.dispatchEvent(new Event("pageshow"));
+    await app.updateComplete;
+    expect(app.connectionId).toBeUndefined();
+    expect(app.features).toBeUndefined();
+    connect(app);
+    await vi.waitFor(() => expect(app.connectionId).toBe(restoredConnectionId));
+
+    window.dispatchEvent(new Event("pagehide"));
+
+    expect(app.connectionId).toBeUndefined();
+    expect(app.features).toBeUndefined();
+    await vi.waitFor(() => expect(disconnect).toHaveBeenCalledTimes(2));
+    expect(disconnect.mock.calls).toEqual([
+      [connectionId, { keepalive: true }],
+      [restoredConnectionId, { keepalive: true }],
+    ]);
+  });
+
+  it("prevents a pre-pagehide late success from overwriting the restored generation", async () => {
+    const pending = deferred<{ connectionId: string; features: typeof features }>();
+    const staleFeatures = { ...features, listAgents: false };
+    let connectCalls = 0;
+    const disconnect = vi.fn(async () => undefined);
+    const app = await mountMain({
+      connect: () => connectCalls++ === 0
+        ? pending.promise
+        : Promise.resolve({ connectionId: restoredConnectionId, features }),
+      disconnect,
+    });
+    connect(app);
+    await app.updateComplete;
+    window.dispatchEvent(new Event("pagehide"));
+    window.dispatchEvent(new Event("pageshow"));
+    await app.updateComplete;
+
+    connect(app);
+    await vi.waitFor(() => expect(app.connectionId).toBe(restoredConnectionId));
+    pending.resolve({ connectionId, features: staleFeatures });
+
+    await vi.waitFor(() => expect(disconnect).toHaveBeenCalledTimes(1));
+    expect(disconnect).toHaveBeenCalledWith(connectionId, { keepalive: true });
+    expect(app.connectionId).toBe(restoredConnectionId);
+    expect(app.features).toEqual(features);
   });
 });

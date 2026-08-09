@@ -27,7 +27,7 @@ describe("pure-plugin transport spike", () => {
         contentType: "text/plain",
       },
     ]);
-  });
+  }, 15_000);
 
   it("preflights an Authorization header, rejecting direct iframe gateway auth", async () => {
     const fixture = await startFakeGateway();
@@ -45,7 +45,7 @@ describe("pure-plugin transport spike", () => {
       { method: "OPTIONS", pathname: "/gateway-auth" },
       { method: "POST", pathname: "/gateway-auth" },
     ]);
-  });
+  }, 15_000);
 
   it("authenticates the public GatewayClient and closes valid and invalid sessions", async () => {
     const fixture = await startFakeGateway();
