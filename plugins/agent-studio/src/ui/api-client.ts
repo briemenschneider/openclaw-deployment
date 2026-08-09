@@ -16,9 +16,13 @@ export type ConnectResult = {
   features: AgentStudioFeatures;
 };
 
+export type DisconnectOptions = {
+  keepalive?: boolean;
+};
+
 export type AgentStudioApi = {
   connect(token: string): Promise<ConnectResult>;
-  disconnect(connectionId: string): Promise<void>;
+  disconnect(connectionId: string, options?: DisconnectOptions): Promise<void>;
 };
 
 export type AgentStudioApiErrorCode = "CONNECT_FAILED" | "DISCONNECT_FAILED";
@@ -49,12 +53,13 @@ function parseConnectResult(value: unknown): ConnectResult | undefined {
   return { connectionId: String(value.connectionId), features };
 }
 
-async function post(fetcher: typeof fetch, body: string): Promise<unknown> {
+async function post(fetcher: typeof fetch, body: string, keepalive = false): Promise<unknown> {
   const response = await fetcher("./api", {
     method: "POST",
     headers: { "Content-Type": "text/plain" },
     body,
     credentials: "omit",
+    ...(keepalive ? { keepalive: true } : {}),
   });
   if (!response.ok) throw new Error("request failed");
   return await response.json() as unknown;
@@ -73,11 +78,12 @@ export function createAgentStudioApiClient(fetcher: typeof fetch = globalThis.fe
       }
     },
 
-    async disconnect(connectionId) {
+    async disconnect(connectionId, options) {
       try {
         const value = await post(
           fetcher,
           JSON.stringify({ action: "disconnect", connectionId }),
+          options?.keepalive,
         );
         if (!isRecord(value) || value.ok !== true) throw new Error("invalid response");
       } catch {

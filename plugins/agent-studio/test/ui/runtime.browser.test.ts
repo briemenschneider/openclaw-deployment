@@ -141,6 +141,14 @@ describe("built panel in a real scripts-only browser frame", () => {
       ).toBe("grid");
       await panel.evaluate<void>("document.querySelector('#directory-toggle').click()");
       expect(await panel.evaluate<boolean>("document.querySelector('#agent-directory').hasAttribute('data-open')")).toBe(true);
+
+      expect(
+        await panel.evaluate<{ hasConnection: boolean; hasFeatures: boolean }>(
+          "(() => { const app = document.querySelector('agent-studio-app'); app.remove(); return { hasConnection: app.connectionId !== undefined, hasFeatures: app.features !== undefined }; })()",
+        ),
+      ).toEqual({ hasConnection: false, hasFeatures: false });
+      await expect.poll(() => requests.length).toBe(2);
+      expect(requests.at(-1)).toEqual({ action: "disconnect" });
     } finally {
       await page.close();
       await browser.close();

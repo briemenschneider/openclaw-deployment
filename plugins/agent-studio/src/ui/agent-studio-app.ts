@@ -3,6 +3,7 @@ import {
   createAgentStudioApiClient,
   type AgentStudioApi,
   type AgentStudioFeatures,
+  type DisconnectOptions,
 } from "./api-client.js";
 
 export type { AgentStudioApi } from "./api-client.js";
@@ -26,6 +27,28 @@ export class AgentStudioApp extends LitElement {
   private drawerOpen = false;
   private statusText = "Gateway token required";
   private errorText = "";
+  private mounted = false;
+  private lifecycleGeneration = 0;
+  private readonly disconnects = new Map<string, Promise<void>>();
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    this.mounted = true;
+    this.lifecycleGeneration += 1;
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.mounted = false;
+    this.lifecycleGeneration += 1;
+    const connectionId = this.connectionId;
+    this.clearLocalConnection();
+    const input = this.querySelector<HTMLInputElement>("#gateway-token");
+    if (input) input.value = "";
+    if (connectionId) {
+      void this.disconnectConnection(connectionId, { keepalive: true });
+    }
+  }
 
   protected createRenderRoot(): HTMLElement {
     return this;
@@ -188,21 +211,28 @@ export class AgentStudioApp extends LitElement {
     const input = this.querySelector<HTMLInputElement>("#gateway-token");
     let token = input?.value ?? "";
     if (!token) return;
+    const generation = this.lifecycleGeneration;
 
     this.connecting = true;
     this.errorText = "";
     this.statusText = "Connecting to Gateway";
     try {
       const result = await this.api.connect(token);
+      if (!this.isCurrentLifecycle(generation)) {
+        void this.disconnectConnection(result.connectionId, { keepalive: true });
+        return;
+      }
       this.connectionId = result.connectionId;
       this.features = result.features;
       this.statusText = "Gateway connected";
     } catch {
+      if (!this.isCurrentLifecycle(generation)) return;
       this.errorText = "Connection failed. Check the token and try again.";
       this.statusText = "Connection failed";
     } finally {
       if (input) input.value = "";
       token = "";
+      if (!this.isCurrentLifecycle(generation)) return;
       this.connecting = false;
       this.requestUpdate();
       await this.updateComplete;
@@ -212,21 +242,49 @@ export class AgentStudioApp extends LitElement {
   private readonly handleDisconnect = async (): Promise<void> => {
     const connectionId = this.connectionId;
     if (!connectionId || this.disconnecting) return;
+    const generation = this.lifecycleGeneration;
     this.disconnecting = true;
     try {
-      await this.api.disconnect(connectionId);
-    } catch {
-      // The local connection handle is discarded even if its backend session already expired.
+      await this.disconnectConnection(connectionId);
     } finally {
-      this.connectionId = undefined;
-      this.features = undefined;
-      this.drawerOpen = false;
-      this.disconnecting = false;
-      this.statusText = "Disconnected. Gateway token required";
+      if (!this.isCurrentLifecycle(generation)) return;
+      this.clearLocalConnection();
       await this.updateComplete;
       this.querySelector<HTMLInputElement>("#gateway-token")?.focus();
     }
   };
+
+  private isCurrentLifecycle(generation: number): boolean {
+    return this.mounted && generation === this.lifecycleGeneration;
+  }
+
+  private clearLocalConnection(): void {
+    this.connectionId = undefined;
+    this.features = undefined;
+    this.drawerOpen = false;
+    this.connecting = false;
+    this.disconnecting = false;
+    this.errorText = "";
+    this.statusText = "Disconnected. Gateway token required";
+  }
+
+  private disconnectConnection(
+    connectionId: string,
+    options?: DisconnectOptions,
+  ): Promise<void> {
+    const existing = this.disconnects.get(connectionId);
+    if (existing) return existing;
+    const operation = Promise.resolve()
+      .then(() => options
+        ? this.api.disconnect(connectionId, options)
+        : this.api.disconnect(connectionId))
+      .catch(() => undefined)
+      .finally(() => {
+        this.disconnects.delete(connectionId);
+      });
+    this.disconnects.set(connectionId, operation);
+    return operation;
+  }
 }
 
 if (!customElements.get("agent-studio-app")) {

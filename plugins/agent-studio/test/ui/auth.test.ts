@@ -131,6 +131,95 @@ describe("Agent Studio authentication", () => {
   });
 });
 
+describe("Agent Studio connection lifecycle", () => {
+  it("clears an established connection and disconnects it once when removed", async () => {
+    const disconnect = vi.fn(async () => undefined);
+    const app = await render({
+      connect: async () => ({ connectionId, features }),
+      disconnect,
+    });
+    element<HTMLInputElement>(app, "#gateway-token").value = "ephemeral";
+    element<HTMLButtonElement>(app, ".primary-action").click();
+    await vi.waitFor(() => expect(app.connectionId).toBe(connectionId));
+
+    app.remove();
+
+    expect(app.connectionId).toBeUndefined();
+    expect(app.features).toBeUndefined();
+    await vi.waitFor(() => expect(disconnect).toHaveBeenCalledTimes(1));
+    expect(disconnect).toHaveBeenCalledWith(connectionId, { keepalive: true });
+
+    document.body.append(app);
+    await app.updateComplete;
+    expect(app.textContent).toContain("Disconnected. Gateway token required");
+  });
+
+  it("cleans a late connection result instead of adopting it after removal", async () => {
+    const pending = deferred<{ connectionId: string; features: typeof features }>();
+    const disconnect = vi.fn(async () => undefined);
+    const app = await render({ connect: () => pending.promise, disconnect });
+    element<HTMLInputElement>(app, "#gateway-token").value = "ephemeral";
+    element<HTMLButtonElement>(app, ".primary-action").click();
+    await app.updateComplete;
+
+    app.remove();
+    pending.resolve({ connectionId, features });
+
+    await vi.waitFor(() => expect(disconnect).toHaveBeenCalledTimes(1));
+    expect(disconnect).toHaveBeenCalledWith(connectionId, { keepalive: true });
+    expect(app.connectionId).toBeUndefined();
+    expect(app.features).toBeUndefined();
+    document.body.append(app);
+    await app.updateComplete;
+    expect(app.querySelector("#disconnect")).toBeNull();
+    expect(app.querySelector("#gateway-token")).not.toBeNull();
+  });
+
+  it("ignores a late rejection after removal without detached error state", async () => {
+    const pending = deferred<{ connectionId: string; features: typeof features }>();
+    const app = await render({ connect: () => pending.promise, disconnect: vi.fn() });
+    element<HTMLInputElement>(app, "#gateway-token").value = "ephemeral";
+    element<HTMLButtonElement>(app, ".primary-action").click();
+    await app.updateComplete;
+
+    app.remove();
+    pending.reject(new AgentStudioApiError("CONNECT_FAILED"));
+    await pending.promise.catch(() => undefined);
+    await Promise.resolve();
+
+    expect(app.connectionId).toBeUndefined();
+    expect(app.features).toBeUndefined();
+    document.body.append(app);
+    await app.updateComplete;
+    expect(app.querySelector('[role="alert"]')?.textContent).toBe("");
+    expect(app.textContent).not.toContain("Connection failed");
+  });
+
+  it("keeps explicit disconnect plus removal idempotent", async () => {
+    const pendingDisconnect = deferred<void>();
+    const disconnect = vi.fn(() => pendingDisconnect.promise);
+    const app = await render({
+      connect: async () => ({ connectionId, features }),
+      disconnect,
+    });
+    element<HTMLInputElement>(app, "#gateway-token").value = "ephemeral";
+    element<HTMLButtonElement>(app, ".primary-action").click();
+    await vi.waitFor(() => expect(app.connectionId).toBe(connectionId));
+
+    element<HTMLButtonElement>(app, "#disconnect").click();
+    await vi.waitFor(() => expect(disconnect).toHaveBeenCalledTimes(1));
+    app.remove();
+    app.remove();
+    expect(disconnect).toHaveBeenCalledTimes(1);
+
+    pendingDisconnect.resolve();
+    await pendingDisconnect.promise;
+    await Promise.resolve();
+    expect(app.connectionId).toBeUndefined();
+    expect(app.features).toBeUndefined();
+  });
+});
+
 describe("Agent Studio API client", () => {
   it("uses exact text/plain POSTs and exposes stable non-leaking errors", async () => {
     let fetchCalls = 0;
@@ -154,5 +243,23 @@ describe("Agent Studio API client", () => {
     expect(failure).toMatchObject({ code: "CONNECT_FAILED", message: "Connection failed" });
     expect(String(failure)).not.toContain("private-token");
     expect(String(failure)).not.toContain("secret.internal");
+  });
+
+  it("uses a keepalive simple POST for teardown disconnect", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ ok: true }), {
+        headers: { "Content-Type": "application/json" },
+      }));
+    const client = createAgentStudioApiClient(fetcher);
+
+    await client.disconnect(connectionId, { keepalive: true });
+
+    expect(fetcher).toHaveBeenCalledWith("./api", {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify({ action: "disconnect", connectionId }),
+      credentials: "omit",
+      keepalive: true,
+    });
   });
 });

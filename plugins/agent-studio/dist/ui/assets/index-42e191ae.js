@@ -553,12 +553,13 @@ function parseConnectResult(value) {
   }
   return { connectionId: String(value.connectionId), features };
 }
-async function post(fetcher, body) {
+async function post(fetcher, body, keepalive = false) {
   const response = await fetcher("./api", {
     method: "POST",
     headers: { "Content-Type": "text/plain" },
     body,
-    credentials: "omit"
+    credentials: "omit",
+    ...keepalive ? { keepalive: true } : {}
   });
   if (!response.ok) throw new Error("request failed");
   return await response.json();
@@ -575,11 +576,12 @@ function createAgentStudioApiClient(fetcher = globalThis.fetch) {
         throw new AgentStudioApiError("CONNECT_FAILED");
       }
     },
-    async disconnect(connectionId) {
+    async disconnect(connectionId, options) {
       try {
         const value = await post(
           fetcher,
-          JSON.stringify({ action: "disconnect", connectionId })
+          JSON.stringify({ action: "disconnect", connectionId }),
+          options?.keepalive
         );
         if (!isRecord(value) || value.ok !== true) throw new Error("invalid response");
       } catch {
@@ -597,6 +599,9 @@ const _AgentStudioApp = class _AgentStudioApp extends i {
     this.drawerOpen = false;
     this.statusText = "Gateway token required";
     this.errorText = "";
+    this.mounted = false;
+    this.lifecycleGeneration = 0;
+    this.disconnects = /* @__PURE__ */ new Map();
     this.handleTokenKeydown = (event) => {
       if (event.key !== "Enter" || event.isComposing) return;
       event.preventDefault();
@@ -607,20 +612,27 @@ const _AgentStudioApp = class _AgentStudioApp extends i {
       const input = this.querySelector("#gateway-token");
       let token = input?.value ?? "";
       if (!token) return;
+      const generation = this.lifecycleGeneration;
       this.connecting = true;
       this.errorText = "";
       this.statusText = "Connecting to Gateway";
       try {
         const result = await this.api.connect(token);
+        if (!this.isCurrentLifecycle(generation)) {
+          void this.disconnectConnection(result.connectionId, { keepalive: true });
+          return;
+        }
         this.connectionId = result.connectionId;
         this.features = result.features;
         this.statusText = "Gateway connected";
       } catch {
+        if (!this.isCurrentLifecycle(generation)) return;
         this.errorText = "Connection failed. Check the token and try again.";
         this.statusText = "Connection failed";
       } finally {
         if (input) input.value = "";
         token = "";
+        if (!this.isCurrentLifecycle(generation)) return;
         this.connecting = false;
         this.requestUpdate();
         await this.updateComplete;
@@ -629,20 +641,34 @@ const _AgentStudioApp = class _AgentStudioApp extends i {
     this.handleDisconnect = async () => {
       const connectionId = this.connectionId;
       if (!connectionId || this.disconnecting) return;
+      const generation = this.lifecycleGeneration;
       this.disconnecting = true;
       try {
-        await this.api.disconnect(connectionId);
-      } catch {
+        await this.disconnectConnection(connectionId);
       } finally {
-        this.connectionId = void 0;
-        this.features = void 0;
-        this.drawerOpen = false;
-        this.disconnecting = false;
-        this.statusText = "Disconnected. Gateway token required";
+        if (!this.isCurrentLifecycle(generation)) return;
+        this.clearLocalConnection();
         await this.updateComplete;
         this.querySelector("#gateway-token")?.focus();
       }
     };
+  }
+  connectedCallback() {
+    super.connectedCallback();
+    this.mounted = true;
+    this.lifecycleGeneration += 1;
+  }
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    this.mounted = false;
+    this.lifecycleGeneration += 1;
+    const connectionId = this.connectionId;
+    this.clearLocalConnection();
+    const input = this.querySelector("#gateway-token");
+    if (input) input.value = "";
+    if (connectionId) {
+      void this.disconnectConnection(connectionId, { keepalive: true });
+    }
   }
   createRenderRoot() {
     return this;
@@ -789,6 +815,27 @@ const _AgentStudioApp = class _AgentStudioApp extends i {
         </div>
       </div>
     `;
+  }
+  isCurrentLifecycle(generation) {
+    return this.mounted && generation === this.lifecycleGeneration;
+  }
+  clearLocalConnection() {
+    this.connectionId = void 0;
+    this.features = void 0;
+    this.drawerOpen = false;
+    this.connecting = false;
+    this.disconnecting = false;
+    this.errorText = "";
+    this.statusText = "Disconnected. Gateway token required";
+  }
+  disconnectConnection(connectionId, options) {
+    const existing = this.disconnects.get(connectionId);
+    if (existing) return existing;
+    const operation = Promise.resolve().then(() => options ? this.api.disconnect(connectionId, options) : this.api.disconnect(connectionId)).catch(() => void 0).finally(() => {
+      this.disconnects.delete(connectionId);
+    });
+    this.disconnects.set(connectionId, operation);
+    return operation;
   }
 };
 _AgentStudioApp.properties = {
