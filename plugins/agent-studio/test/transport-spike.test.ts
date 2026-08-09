@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { GatewayClient } from "openclaw/plugin-sdk/gateway-runtime";
 import { startFakeGateway, type FakeGateway } from "./fixtures/fake-gateway.js";
+import { hasBrowser } from "./helpers/browser.js";
+import { get } from "node:http";
 
 const openFixtures = new Set<FakeGateway>();
 
@@ -10,7 +12,9 @@ afterEach(async () => {
 });
 
 describe("pure-plugin transport spike", () => {
-  it("sends an opaque-origin text/plain POST without a preflight", async () => {
+  // These two drive a real browser; the GatewayClient test below does not, so only
+  // these are skipped where no browser is installed.
+  it.skipIf(!hasBrowser)("sends an opaque-origin text/plain POST without a preflight", async () => {
     const fixture = await startFakeGateway();
     openFixtures.add(fixture);
 
@@ -29,7 +33,7 @@ describe("pure-plugin transport spike", () => {
     ]);
   }, 15_000);
 
-  it("preflights an Authorization header, rejecting direct iframe gateway auth", async () => {
+  it.skipIf(!hasBrowser)("preflights an Authorization header, rejecting direct iframe gateway auth", async () => {
     const fixture = await startFakeGateway();
     openFixtures.add(fixture);
 
@@ -108,5 +112,39 @@ describe("pure-plugin transport spike", () => {
     }
 
     await expect.poll(() => fixture.activeConnectionCount()).toBe(0);
+  });
+});
+
+async function getText(url: string): Promise<string> {
+  return await new Promise((resolve, reject) => {
+    get(url, (response) => {
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk: string) => {
+        body += chunk;
+      });
+      response.on("end", () => resolve(body));
+    }).on("error", reject);
+  });
+}
+
+describe("fake gateway page escaping", () => {
+  it("cannot be broken out of by a value containing a script end tag", async () => {
+    const fixture = await startFakeGateway();
+    openFixtures.add(fixture);
+
+    const search = new URLSearchParams({
+      pathname: "/bridge",
+      body: '</script><img src=x onerror="globalThis.__pwned=1">',
+      headers: JSON.stringify({ "Content-Type": "text/plain" }),
+    });
+    const httpUrl = fixture.gatewayUrl.replace(/^ws/, "http");
+    const html = await getText(`${httpUrl}/opaque-frame?${search.toString()}`);
+
+    // The payload survives only as escaped script text: the page keeps exactly its own
+    // one closing tag, and the injected element never becomes markup.
+    expect(html).toContain("u003c/script");
+    expect(html).not.toContain("<img");
+    expect(html.match(/<\/script>/g) ?? []).toHaveLength(1);
   });
 });

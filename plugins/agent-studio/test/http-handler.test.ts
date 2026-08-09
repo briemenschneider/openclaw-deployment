@@ -1,4 +1,3 @@
-import { accessSync, constants } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 import {
@@ -17,6 +16,7 @@ import {
   createAgentStudioHttpHandler,
   type PanelRequestBroker,
 } from "../src/http-handler.js";
+import { browserExecutable, hasBrowser } from "./helpers/browser.js";
 
 type ResponseSnapshot = {
   status: number;
@@ -53,18 +53,6 @@ type PlaywrightCore = {
 const require = createRequire(import.meta.url);
 const requireFromOpenClaw = createRequire(require.resolve("openclaw/plugin-sdk/gateway-runtime"));
 const { chromium } = requireFromOpenClaw("playwright-core") as PlaywrightCore;
-const browserExecutable = [
-  "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-  "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-  "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
-].find((candidate) => {
-  try {
-    accessSync(candidate, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-});
 
 beforeEach(async () => {
   assetsRoot = await mkdtemp(join(tmpdir(), "agent-studio-http-"));
@@ -203,8 +191,9 @@ describe("Agent Studio HTTP handler", () => {
     expect(hashedCss.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
   });
 
-  it("loads an external module in a scripts-only opaque iframe", async () => {
-    if (!browserExecutable) throw new Error("Chrome or Edge executable is required for HTTP tests");
+  // Skipped rather than failed where no browser is installed; see test/helpers/browser.ts.
+  it.skipIf(!hasBrowser)("loads an external module in a scripts-only opaque iframe", async () => {
+    if (!browserExecutable) throw new Error("unreachable: test is skipped without a browser");
     const { broker } = recordingBroker();
     const { port } = await startHandler(broker, true);
     const browser = await chromium.launch({ executablePath: browserExecutable, headless: true });

@@ -1,9 +1,9 @@
-import { accessSync, constants } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createAgentStudioHttpHandler } from "../../src/http-handler.js";
+import { browserExecutable, hasBrowser } from "../helpers/browser.js";
 
 const connectionId = "c".repeat(64);
 const features = {
@@ -44,18 +44,6 @@ type PlaywrightCore = {
 const require = createRequire(import.meta.url);
 const requireFromOpenClaw = createRequire(require.resolve("openclaw/plugin-sdk/gateway-runtime"));
 const { chromium } = requireFromOpenClaw("playwright-core") as PlaywrightCore;
-const browserExecutable = [
-  "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-  "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-  "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
-].find((candidate) => {
-  try {
-    accessSync(candidate, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-});
 
 afterEach(async () => {
   await Promise.all(
@@ -98,9 +86,11 @@ async function startBuiltPanel(): Promise<{ port: number; requests: Array<Record
   return { port: address.port, requests };
 }
 
-describe("built panel in a real scripts-only browser frame", () => {
+// Needs a real browser: happy-dom cannot prove opaque-origin isolation. Skipped rather
+// than failed where none is installed, so the suite still runs on Linux/macOS/CI.
+describe.skipIf(!hasBrowser)("built panel in a real scripts-only browser frame", () => {
   it("stays isolated, clears the token, and disconnects when its parent removes the iframe", async () => {
-    if (!browserExecutable) throw new Error("Chrome or Edge executable is required for UI tests");
+    if (!browserExecutable) throw new Error("unreachable: suite is skipped without a browser");
     const { port, requests } = await startBuiltPanel();
     const browser = await chromium.launch({ executablePath: browserExecutable, headless: true });
     const page = await browser.newPage();

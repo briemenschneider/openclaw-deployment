@@ -1319,6 +1319,7 @@ const _SessionCreate = class _SessionCreate extends i {
             class="session-advanced quiet-action"
             type="button"
             aria-expanded=${this.advancedOpen ? "true" : "false"}
+            aria-controls="session-dialog"
             @click=${() => this.emitAdvanced(!this.advancedOpen)}
           >
             Advanced
@@ -1332,7 +1333,12 @@ const _SessionCreate = class _SessionCreate extends i {
   }
   renderDialog(busy) {
     return b`
-      <div class="session-dialog" role="dialog" aria-label="Advanced session options">
+      <div
+        id="session-dialog"
+        class="session-dialog"
+        role="dialog"
+        aria-label="Advanced session options"
+      >
         <label for="session-label">Label</label>
         <input id="session-label" type="text" maxlength="256" spellcheck="false" />
         <label for="session-model">Model override</label>

@@ -229,6 +229,7 @@ export class SessionCreate extends LitElement {
             class="session-advanced quiet-action"
             type="button"
             aria-expanded=${this.advancedOpen ? "true" : "false"}
+            aria-controls="session-dialog"
             @click=${() => this.emitAdvanced(!this.advancedOpen)}
           >
             Advanced
@@ -247,7 +248,12 @@ export class SessionCreate extends LitElement {
 
   private renderDialog(busy: boolean): TemplateResult {
     return html`
-      <div class="session-dialog" role="dialog" aria-label="Advanced session options">
+      <div
+        id="session-dialog"
+        class="session-dialog"
+        role="dialog"
+        aria-label="Advanced session options"
+      >
         <label for="session-label">Label</label>
         <input id="session-label" type="text" maxlength="256" spellcheck="false" />
         <label for="session-model">Model override</label>

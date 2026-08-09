@@ -258,10 +258,15 @@ describe("session create component", () => {
       requests.push((event as CustomEvent<Record<string, unknown>>).detail);
     });
 
-    query<HTMLButtonElement>(element, ".session-advanced").click();
+    const toggle = query<HTMLButtonElement>(element, ".session-advanced");
+    expect(toggle.getAttribute("aria-controls")).toBe("session-dialog");
+    toggle.click();
     await element.updateComplete;
     const dialog = query<HTMLElement>(element, ".session-dialog");
     expect(dialog.getAttribute("role")).toBe("dialog");
+    // aria-controls must name a region that exists once the toggle is expanded.
+    expect(dialog.id).toBe("session-dialog");
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
 
     query<HTMLInputElement>(dialog, "#session-label").value = "nightly";
     query<HTMLInputElement>(dialog, "#session-model").value = "opus";

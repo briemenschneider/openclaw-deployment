@@ -1,6 +1,6 @@
-import { accessSync, constants } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createRequire } from "node:module";
+import { browserExecutable } from "../helpers/browser.js";
 
 export type CapturedHttpRequest = {
   method: string;
@@ -57,22 +57,29 @@ const requireFromOpenClaw = createRequire(require.resolve("openclaw/plugin-sdk/g
 const { chromium } = requireFromOpenClaw("playwright-core") as PlaywrightCore;
 const { WebSocketServer } = requireFromOpenClaw("ws") as WsModule;
 
-const browserExecutable = [
-  "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
-  "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
-  "C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
-].find((candidate) => {
-  try {
-    accessSync(candidate, constants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
-});
-
 function writeHtml(response: ServerResponse, html: string): void {
   response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
   response.end(html);
+}
+
+/**
+ * Embeds a value in an inline <script>. JSON.stringify alone is not enough: it does not
+ * escape "</script>", so a value containing it would close the tag and everything after
+ * would be parsed as HTML.
+ */
+function scriptJson(value: unknown): string {
+  return JSON.stringify(value)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e");
+}
+
+/** Escapes a value for use inside a double-quoted HTML attribute. */
+function attribute(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 async function readBody(request: IncomingMessage): Promise<void> {
@@ -100,7 +107,7 @@ export async function startFakeGateway(): Promise<FakeGateway> {
             window.__transportDone = true;
             window.__transportError = event.data.error ?? null;
           });
-        </script><iframe sandbox="allow-scripts" src="/opaque-frame?${frameSearch}"></iframe>`,
+        </script><iframe sandbox="allow-scripts" src="/opaque-frame?${attribute(frameSearch)}"></iframe>`,
       );
       return;
     }
@@ -112,10 +119,10 @@ export async function startFakeGateway(): Promise<FakeGateway> {
       writeHtml(
         response,
         `<!doctype html><script>
-          fetch(${JSON.stringify(pathname)}, {
+          fetch(${scriptJson(pathname)}, {
             method: "POST",
-            headers: ${JSON.stringify(headers)},
-            body: ${JSON.stringify(body)}
+            headers: ${scriptJson(headers)},
+            body: ${scriptJson(body)}
           }).then((response) => {
             if (!response.ok) throw new Error("HTTP " + response.status);
             parent.postMessage({ type: "transport-result" }, "*");
