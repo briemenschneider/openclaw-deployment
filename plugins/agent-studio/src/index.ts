@@ -1,5 +1,6 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { createAgentStudioHttpHandler, type PanelRequestBroker } from "./http-handler.js";
+import { createPanelRequestBroker } from "./gateway-operations.js";
+import { createAgentStudioHttpHandler } from "./http-handler.js";
 import { PanelSessionBroker } from "./panel-sessions.js";
 
 function loopbackGatewayUrl(config: unknown): string {
@@ -26,25 +27,11 @@ export default definePluginEntry({
       sessions ??= new PanelSessionBroker({ gatewayUrl: loopbackGatewayUrl(api.config) });
       return sessions;
     };
-    const broker: PanelRequestBroker = {
-      async handle(request, sourceIp) {
-        const panelSessions = getSessions();
-        if (request.action === "connect") return await panelSessions.connect(request.token, sourceIp);
-        if (request.action === "disconnect") {
-          return await panelSessions.disconnect(request.connectionId);
-        }
-        if (!panelSessions.getClient(request.connectionId)) {
-          return {
-            ok: false,
-            error: { code: "CONNECTION_EXPIRED", message: "Connection expired" },
-          };
-        }
-        return {
-          ok: false,
-          error: { code: "UNSUPPORTED_OPERATION", message: "Unsupported operation" },
-        };
-      },
-    };
+    const broker = createPanelRequestBroker({
+      connect: async (token, sourceIp) => await getSessions().connect(token, sourceIp),
+      disconnect: async (connectionId) => await getSessions().disconnect(connectionId),
+      getOperationSession: (connectionId) => getSessions().getOperationSession(connectionId),
+    });
 
     api.session.controls.registerControlUiDescriptor({
       id: "agent-studio",

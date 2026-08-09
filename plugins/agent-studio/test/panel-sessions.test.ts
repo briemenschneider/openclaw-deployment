@@ -37,7 +37,7 @@ function controlledFactory(mode: "hello" | "error" | "manual" = "hello") {
         return {} as T;
       },
       hello() {
-        options.onHelloOk?.({} as never);
+        options.onHelloOk?.({ features: { methods: [], events: [] } } as never);
       },
       close() {
         client.active = false;
@@ -74,6 +74,17 @@ describe("panel session broker", () => {
     expect(response).toEqual({
       ok: true,
       connectionId: expect.stringMatching(/^[0-9a-f]{64}$/),
+      features: {
+        listAgents: false,
+        getAgent: false,
+        updateAgent: false,
+        listAgentFiles: false,
+        getAgentFile: false,
+        setAgentFile: false,
+        listModels: false,
+        listSessions: false,
+        createSession: false,
+      },
     });
     if (!response.ok) throw new Error("expected connection");
     expect(fixture.connectAttempts).toEqual([

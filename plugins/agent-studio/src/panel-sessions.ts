@@ -1,5 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { GatewayClient } from "openclaw/plugin-sdk/gateway-runtime";
+import {
+  deriveGatewayOperationFeatures,
+  type GatewayOperationFeatures,
+} from "./gateway-operations.js";
 
 type GatewayClientOptions = ConstructorParameters<typeof GatewayClient>[0];
 
@@ -44,11 +48,14 @@ type BrokerErrorResult = {
   error: { code: BrokerErrorCode; message: string };
 };
 
-export type ConnectResult = { ok: true; connectionId: string } | BrokerErrorResult;
+export type ConnectResult =
+  | { ok: true; connectionId: string; features: GatewayOperationFeatures }
+  | BrokerErrorResult;
 export type DisconnectResult = { ok: true } | BrokerErrorResult;
 
 type PanelSession = {
   client: GatewayClientLike;
+  advertisedMethods: ReadonlySet<string>;
   sourceIp: string;
   idleTimer?: ReturnType<typeof setTimeout>;
 };
@@ -121,6 +128,7 @@ export class PanelSessionBroker {
     let resolveHello!: () => void;
     let rejectHello!: (error: Error) => void;
     let connectionId: string | undefined;
+    let advertisedMethods = new Set<string>();
     let closedBeforeRegistration = false;
     const hello = new Promise<void>((resolve, reject) => {
       resolveHello = resolve;
@@ -139,7 +147,10 @@ export class PanelSessionBroker {
         logError: () => undefined,
         redactForLog: () => "[redacted]",
       },
-      onHelloOk: () => resolveHello(),
+      onHelloOk: (hello) => {
+        advertisedMethods = new Set(hello.features.methods);
+        resolveHello();
+      },
       onConnectError: (error) => rejectHello(error),
       onClose: () => {
         if (connectionId) {
@@ -170,12 +181,17 @@ export class PanelSessionBroker {
       connectionId = this.#newConnectionId();
       const session: PanelSession = {
         client,
+        advertisedMethods,
         sourceIp,
       };
       this.#sessions.set(connectionId, session);
       this.#scheduleIdleExpiry(connectionId, session);
       this.#log({ action: "connect", connectionId });
-      return { ok: true, connectionId };
+      return {
+        ok: true,
+        connectionId,
+        features: deriveGatewayOperationFeatures([...advertisedMethods]),
+      };
     } catch {
       if (client) await this.#stopClient(client);
       this.#log({ action: "connect" });
@@ -190,10 +206,16 @@ export class PanelSessionBroker {
   }
 
   getClient(connectionId: string): GatewayClientLike | undefined {
+    return this.getOperationSession(connectionId)?.client;
+  }
+
+  getOperationSession(
+    connectionId: string,
+  ): { client: GatewayClientLike; advertisedMethods: ReadonlySet<string> } | undefined {
     const session = this.#sessions.get(connectionId);
     if (!session) return undefined;
     this.#scheduleIdleExpiry(connectionId, session);
-    return session.client;
+    return { client: session.client, advertisedMethods: session.advertisedMethods };
   }
 
   async disconnect(connectionId: string): Promise<DisconnectResult> {
