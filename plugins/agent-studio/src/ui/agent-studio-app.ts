@@ -10,7 +10,16 @@ import {
   type AgentDirectoryState,
   type AgentDirectoryStore,
 } from "./agent-state.js";
+import {
+  PERSONA_FILES,
+  createPersonaStore,
+  type PersonaResolution,
+  type PersonaState,
+  type PersonaStore,
+} from "./persona-state.js";
 import "./agent-directory.js";
+import "./agent-overview.js";
+import "./agent-persona.js";
 
 export type { AgentStudioApi } from "./api-client.js";
 
@@ -24,6 +33,8 @@ export class AgentStudioApp extends LitElement {
     statusText: { state: true },
     errorText: { state: true },
     directoryState: { state: true },
+    personaState: { state: true },
+    workspaceTab: { state: true },
   };
 
   api: AgentStudioApi = createAgentStudioApiClient();
@@ -40,6 +51,11 @@ export class AgentStudioApp extends LitElement {
   private directoryState?: AgentDirectoryState;
   private directory?: AgentDirectoryStore;
   private unsubscribeDirectory?: () => void;
+  private workspaceTab: "overview" | "persona" = "overview";
+  private personaState?: PersonaState;
+  private persona?: PersonaStore;
+  private unsubscribePersona?: () => void;
+  private personaSyncing = false;
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -209,20 +225,70 @@ export class AgentStudioApp extends LitElement {
           </aside>
 
           <main id="agent-workspace" class="agent-workspace" aria-label="Agent workspace">
-            <div class="workspace-header" aria-hidden="true">
-              <span class="workspace-kicker">Workspace / no selection</span>
+            <div class="workspace-header">
+              <span class="workspace-kicker">
+                Workspace / ${this.directoryState?.selectedAgent?.label ?? "no selection"}
+              </span>
               <span class="header-rule"></span>
             </div>
-            <section class="workspace-placeholder" aria-labelledby="workspace-empty-title">
-              <div class="radar-mark" aria-hidden="true"><span></span></div>
-              <p class="eyebrow">Standing by</p>
-              <h1 id="workspace-empty-title">Select an agent to begin</h1>
-              <p>
-                Agent overview, persona controls, and session tools will occupy this workspace.
-              </p>
-            </section>
+            ${this.directoryState?.selectedAgent
+              ? this.renderAgentWorkspace()
+              : html`
+                  <section class="workspace-placeholder" aria-labelledby="workspace-empty-title">
+                    <div class="radar-mark" aria-hidden="true"><span></span></div>
+                    <p class="eyebrow">Standing by</p>
+                    <h1 id="workspace-empty-title">Select an agent to begin</h1>
+                    <p>
+                      Agent overview, persona controls, and session tools will occupy this
+                      workspace.
+                    </p>
+                  </section>
+                `}
           </main>
         </div>
+      </div>
+    `;
+  }
+
+  private renderAgentWorkspace(): TemplateResult {
+    const agent = this.directoryState?.selectedAgent;
+    return html`
+      <div class="workspace-body">
+        <div id="workspace-tabs" class="workspace-tabs" role="tablist" aria-label="Agent sections">
+          ${(["overview", "persona"] as const).map(
+            (tab) => html`
+              <button
+                class="workspace-tab"
+                type="button"
+                role="tab"
+                data-tab=${tab}
+                aria-selected=${this.workspaceTab === tab ? "true" : "false"}
+                tabindex=${this.workspaceTab === tab ? 0 : -1}
+                @click=${() => {
+                  this.workspaceTab = tab;
+                }}
+              >
+                ${tab === "overview" ? "Overview" : "Persona"}
+              </button>
+            `,
+          )}
+        </div>
+        ${this.workspaceTab === "overview"
+          ? html`<agent-overview
+              .agent=${agent}
+              .features=${this.features}
+              .errorText=${this.directoryState?.updateErrorText}
+              @agent-update=${this.handleAgentUpdate}
+            ></agent-overview>`
+          : html`<agent-persona
+              .state=${this.personaState ?? { status: "idle", files: [], canSave: false, expired: false }}
+              @persona-select=${this.handlePersonaSelect}
+              @persona-input=${this.handlePersonaInput}
+              @persona-save=${this.handlePersonaSave}
+              @persona-cancel=${this.handlePersonaCancel}
+              @persona-create=${this.handlePersonaCreate}
+              @persona-resolve=${this.handlePersonaResolve}
+            ></agent-persona>`}
       </div>
     `;
   }
@@ -297,6 +363,14 @@ export class AgentStudioApp extends LitElement {
       this.directoryState = state;
     });
     this.directoryState = store.getState();
+
+    const persona = createPersonaStore({ api: this.api, connectionId, features });
+    this.persona = persona;
+    this.unsubscribePersona = persona.subscribe((state) => {
+      if (!this.isCurrentLifecycle(generation) || this.persona !== persona) return;
+      this.personaState = state;
+    });
+
     void store.load();
   }
 
@@ -305,6 +379,40 @@ export class AgentStudioApp extends LitElement {
     this.unsubscribeDirectory = undefined;
     this.directory = undefined;
     this.directoryState = undefined;
+    this.unsubscribePersona?.();
+    this.unsubscribePersona = undefined;
+    this.persona = undefined;
+    this.personaState = undefined;
+    this.workspaceTab = "overview";
+  }
+
+  protected updated(): void {
+    this.syncPersona();
+  }
+
+  /** Loads persona files only once the operator actually opens the Persona tab. */
+  private syncPersona(): void {
+    const agentId = this.directoryState?.selectedId;
+    const persona = this.persona;
+    if (this.workspaceTab !== "persona" || !agentId || !persona || this.personaSyncing) return;
+
+    if (this.personaState?.agentId !== agentId) {
+      this.personaSyncing = true;
+      void persona
+        .selectAgent(agentId)
+        .then(() => this.selectFirstPersonaFile())
+        .finally(() => {
+          this.personaSyncing = false;
+        });
+      return;
+    }
+    void this.selectFirstPersonaFile();
+  }
+
+  private async selectFirstPersonaFile(): Promise<void> {
+    const state = this.persona?.getState();
+    if (!this.persona || !state || state.status !== "ready" || state.selected) return;
+    await this.persona.selectFile(PERSONA_FILES[0]);
   }
 
   private readonly handleAgentSelect = (event: Event): void => {
@@ -320,6 +428,40 @@ export class AgentStudioApp extends LitElement {
   private readonly handleAgentColor = (event: Event): void => {
     const { agentId, color } = (event as CustomEvent<{ agentId: string; color: string }>).detail;
     void this.directory?.setColor(agentId, color);
+  };
+
+  private readonly handleAgentUpdate = (event: Event): void => {
+    const { agentId, name, model } = (
+      event as CustomEvent<{ agentId: string; name?: string; model?: string }>
+    ).detail;
+    void this.directory?.updateAgent(agentId, { name, model });
+  };
+
+  private readonly handlePersonaSelect = (event: Event): void => {
+    const { name } = (event as CustomEvent<{ name: string }>).detail;
+    void this.persona?.selectFile(name);
+  };
+
+  private readonly handlePersonaInput = (event: Event): void => {
+    const { text } = (event as CustomEvent<{ text: string }>).detail;
+    this.persona?.setDraft(text);
+  };
+
+  private readonly handlePersonaSave = (): void => {
+    void this.persona?.save();
+  };
+
+  private readonly handlePersonaCancel = (): void => {
+    void this.persona?.cancel();
+  };
+
+  private readonly handlePersonaCreate = (): void => {
+    this.persona?.createFile();
+  };
+
+  private readonly handlePersonaResolve = (event: Event): void => {
+    const { choice } = (event as CustomEvent<{ choice: PersonaResolution }>).detail;
+    void this.persona?.resolveConflict(choice);
   };
 
   private isCurrentLifecycle(generation: number): boolean {

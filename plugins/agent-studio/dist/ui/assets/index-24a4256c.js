@@ -544,14 +544,14 @@ class AgentStudioApiError extends Error {
   }
 }
 const CONNECTION_ID_PATTERN = /^[0-9a-f]{64}$/;
-function isRecord$1(value) {
+function isRecord$2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function parseConnectResult(value) {
-  if (!isRecord$1(value) || value.ok !== true || !CONNECTION_ID_PATTERN.test(String(value.connectionId))) {
+  if (!isRecord$2(value) || value.ok !== true || !CONNECTION_ID_PATTERN.test(String(value.connectionId))) {
     return void 0;
   }
-  if (!isRecord$1(value.features)) return void 0;
+  if (!isRecord$2(value.features)) return void 0;
   const features = {};
   for (const name of FEATURE_NAMES) {
     if (typeof value.features[name] !== "boolean") return void 0;
@@ -589,7 +589,7 @@ function createAgentStudioApiClient(fetcher = globalThis.fetch) {
           JSON.stringify({ action: "disconnect", connectionId }),
           options?.keepalive
         );
-        if (!isRecord$1(value) || value.ok !== true) throw new Error("invalid response");
+        if (!isRecord$2(value) || value.ok !== true) throw new Error("invalid response");
       } catch {
         throw new AgentStudioApiError("DISCONNECT_FAILED");
       }
@@ -604,9 +604,9 @@ function createAgentStudioApiClient(fetcher = globalThis.fetch) {
       } catch {
         throw new AgentStudioApiError("OPERATION_FAILED");
       }
-      if (!isRecord$1(value)) throw new AgentStudioApiError("OPERATION_FAILED");
+      if (!isRecord$2(value)) throw new AgentStudioApiError("OPERATION_FAILED");
       if (value.ok === true) return value.data;
-      const code = isRecord$1(value.error) ? value.error.code : void 0;
+      const code = isRecord$2(value.error) ? value.error.code : void 0;
       throw new AgentStudioApiError(
         code === "CONNECTION_EXPIRED" ? "CONNECTION_EXPIRED" : "OPERATION_FAILED"
       );
@@ -650,33 +650,35 @@ function normalizeHexColor(value) {
   return void 0;
 }
 const LIST_UNAVAILABLE = "This Gateway does not expose agent listing.";
-const LIST_FAILED = "Agent directory unavailable.";
+const LIST_FAILED$1 = "Agent directory unavailable.";
 const COLOR_INVALID = "Enter a color as #rrggbb.";
 const COLOR_FAILED = "Could not save that color. Reverting.";
-function isRecord(value) {
+const UPDATE_FAILED = "Could not update this agent.";
+function isRecord$1(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function optionalString(value) {
   return typeof value === "string" && value.length > 0 ? value : void 0;
 }
 function parseAgent(value) {
-  if (!isRecord(value) || typeof value.id !== "string" || value.id.length === 0) return void 0;
-  const identity = isRecord(value.identity) ? value.identity : void 0;
-  const model = isRecord(value.model) ? value.model : void 0;
+  if (!isRecord$1(value) || typeof value.id !== "string" || value.id.length === 0) return void 0;
+  const identity = isRecord$1(value.identity) ? value.identity : void 0;
+  const model = isRecord$1(value.model) ? value.model : void 0;
   return {
     id: value.id,
     label: optionalString(identity?.name) ?? optionalString(value.name) ?? value.id,
     emoji: optionalString(identity?.emoji),
-    model: optionalString(model?.primary)
+    model: optionalString(model?.primary),
+    workspaceGit: typeof value.workspaceGit === "boolean" ? value.workspaceGit : void 0
   };
 }
 function parseAgentsResponse(value) {
-  if (!isRecord(value)) return { agents: [] };
+  if (!isRecord$1(value)) return { agents: [] };
   const agents = Array.isArray(value.agents) ? value.agents.map(parseAgent).filter((agent) => agent !== void 0) : [];
   return { defaultId: optionalString(value.defaultId), agents };
 }
 function parseColorsResponse(value) {
-  if (!isRecord(value) || !isRecord(value.colors)) return {};
+  if (!isRecord$1(value) || !isRecord$1(value.colors)) return {};
   const colors = {};
   for (const [agentId, color] of Object.entries(value.colors)) {
     const normalized = normalizeHexColor(color);
@@ -711,6 +713,7 @@ function createAgentDirectoryStore(options) {
   let selectedId;
   let errorText;
   let colorErrorText;
+  let updateErrorText;
   function snapshot() {
     return {
       status,
@@ -718,8 +721,10 @@ function createAgentDirectoryStore(options) {
       totalCount: all.length,
       query,
       selectedId,
+      selectedAgent: all.find((agent) => agent.id === selectedId),
       errorText,
-      colorErrorText
+      colorErrorText,
+      updateErrorText
     };
   }
   function notify() {
@@ -761,7 +766,7 @@ function createAgentDirectoryStore(options) {
         status = "error";
         all = [];
         selectedId = void 0;
-        errorText = LIST_FAILED;
+        errorText = LIST_FAILED$1;
         notify();
         return;
       }
@@ -803,10 +808,304 @@ function createAgentDirectoryStore(options) {
         colorErrorText = COLOR_FAILED;
         notify();
       }
+    },
+    async updateAgent(agentId, patch) {
+      const index = all.findIndex((agent) => agent.id === agentId);
+      if (index < 0) return;
+      const payload = { agentId };
+      if (patch.name !== void 0) payload.name = patch.name;
+      if (patch.model !== void 0) payload.model = patch.model;
+      if (Object.keys(payload).length < 2) return;
+      const previous = all[index];
+      all = all.map(
+        (agent) => agent.id === agentId ? {
+          ...agent,
+          label: patch.name ?? agent.label,
+          model: patch.model ?? agent.model
+        } : agent
+      );
+      updateErrorText = void 0;
+      notify();
+      try {
+        await api.operation(connectionId, "updateAgent", payload);
+      } catch {
+        all = all.map((agent) => agent.id === agentId ? previous : agent);
+        updateErrorText = UPDATE_FAILED;
+        notify();
+      }
     }
   };
 }
-const IDLE_STATE = {
+const PERSONA_FILES = [
+  "AGENTS.md",
+  "SOUL.md",
+  "USER.md",
+  "IDENTITY.md",
+  "TOOLS.md",
+  "HEARTBEAT.md",
+  "BOOTSTRAP.md",
+  "MEMORY.md"
+];
+const MAX_PERSONA_CHARACTERS = 6e4;
+const FILES_UNAVAILABLE = "This Gateway does not expose agent files.";
+const LIST_FAILED = "Could not load this agent's files.";
+const LOAD_FAILED = "Could not load this file.";
+const SAVE_FAILED = "Could not save this file.";
+const TOO_LARGE = "This file is too large to save (60,000 characters max).";
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function isExpired(error) {
+  return error instanceof AgentStudioApiError && error.code === "CONNECTION_EXPIRED";
+}
+function parseFileEntries(value) {
+  const reported = /* @__PURE__ */ new Map();
+  if (isRecord(value) && Array.isArray(value.files)) {
+    for (const file of value.files) {
+      if (isRecord(file) && typeof file.name === "string") {
+        reported.set(file.name, file.missing === true);
+      }
+    }
+  }
+  return PERSONA_FILES.map((name) => ({
+    name,
+    missing: reported.get(name) ?? true
+  }));
+}
+function parseFileContent(value) {
+  if (!isRecord(value) || !isRecord(value.file)) return void 0;
+  if (value.file.missing === true) return void 0;
+  return typeof value.file.content === "string" ? value.file.content : "";
+}
+function editorFor(name, content) {
+  return {
+    name,
+    status: "ready",
+    missing: content === void 0,
+    creating: false,
+    original: content ?? "",
+    draft: content ?? "",
+    dirty: false,
+    saving: false,
+    saved: false
+  };
+}
+function createPersonaStore(options) {
+  const { api, connectionId, features } = options;
+  const available = features.listAgentFiles && features.getAgentFile;
+  const listeners = /* @__PURE__ */ new Set();
+  const cache = /* @__PURE__ */ new Map();
+  let agentId;
+  let status = "idle";
+  let errorText;
+  let files = [];
+  let selected;
+  let expired = false;
+  function cacheKey(name) {
+    return `${agentId ?? ""}\0${name}`;
+  }
+  function current() {
+    return selected ? cache.get(cacheKey(selected)) : void 0;
+  }
+  function snapshot() {
+    const file = current();
+    return {
+      agentId,
+      status,
+      errorText,
+      files: files.map((entry) => ({ ...entry })),
+      selected,
+      file: file ? { ...file } : void 0,
+      canSave: features.setAgentFile,
+      expired
+    };
+  }
+  function notify() {
+    const state = snapshot();
+    for (const listener of listeners) listener(state);
+  }
+  function update(patch) {
+    const file = current();
+    if (!file || !selected) return;
+    cache.set(cacheKey(selected), { ...file, ...patch });
+    notify();
+  }
+  function markMissing(name, missing) {
+    files = files.map((entry) => entry.name === name ? { ...entry, missing } : entry);
+  }
+  function handleFailure(error, message) {
+    if (isExpired(error)) {
+      expired = true;
+      update({ saving: false });
+      notify();
+      return;
+    }
+    update({ saving: false, errorText: message });
+  }
+  async function fetchContent(name) {
+    const response = await api.operation(connectionId, "getAgentFile", { agentId, name });
+    return parseFileContent(response);
+  }
+  async function writeContent(name, content) {
+    await api.operation(connectionId, "setAgentFile", { agentId, name, content });
+  }
+  async function saveDraft() {
+    const file = current();
+    if (!file || !agentId || !features.setAgentFile) return;
+    if (file.draft.length > MAX_PERSONA_CHARACTERS) {
+      update({ errorText: TOO_LARGE, saved: false });
+      return;
+    }
+    update({ saving: true, errorText: void 0, saved: false });
+    let serverContent;
+    try {
+      serverContent = await fetchContent(file.name);
+    } catch (error) {
+      handleFailure(error, SAVE_FAILED);
+      return;
+    }
+    if ((serverContent ?? "") !== file.original) {
+      update({
+        saving: false,
+        conflict: { server: serverContent ?? "", local: file.draft }
+      });
+      return;
+    }
+    try {
+      await writeContent(file.name, file.draft);
+    } catch (error) {
+      handleFailure(error, SAVE_FAILED);
+      return;
+    }
+    markMissing(file.name, false);
+    update({
+      saving: false,
+      saved: true,
+      dirty: false,
+      missing: false,
+      creating: false,
+      original: file.draft,
+      conflict: void 0
+    });
+  }
+  return {
+    getState: snapshot,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    async selectAgent(nextAgentId) {
+      agentId = nextAgentId;
+      selected = void 0;
+      errorText = void 0;
+      if (!available) {
+        status = "error";
+        errorText = FILES_UNAVAILABLE;
+        files = [];
+        notify();
+        return;
+      }
+      status = "loading";
+      notify();
+      try {
+        files = parseFileEntries(
+          await api.operation(connectionId, "listAgentFiles", { agentId: nextAgentId })
+        );
+        status = "ready";
+      } catch (error) {
+        if (isExpired(error)) expired = true;
+        status = "error";
+        files = [];
+        errorText = LIST_FAILED;
+      }
+      notify();
+    },
+    async selectFile(name) {
+      if (!agentId || !available || !PERSONA_FILES.includes(name)) {
+        return;
+      }
+      selected = name;
+      const cached = cache.get(cacheKey(name));
+      if (cached) {
+        notify();
+        return;
+      }
+      cache.set(cacheKey(name), {
+        name,
+        status: "loading",
+        missing: false,
+        creating: false,
+        original: "",
+        draft: "",
+        dirty: false,
+        saving: false,
+        saved: false
+      });
+      notify();
+      try {
+        const content = await fetchContent(name);
+        cache.set(cacheKey(name), editorFor(name, content));
+        markMissing(name, content === void 0);
+      } catch (error) {
+        if (isExpired(error)) expired = true;
+        cache.delete(cacheKey(name));
+        cache.set(cacheKey(name), {
+          ...editorFor(name, ""),
+          status: "error",
+          errorText: LOAD_FAILED
+        });
+      }
+      notify();
+    },
+    setDraft(text) {
+      const file = current();
+      if (!file) return;
+      update({ draft: text, dirty: text !== file.original, saved: false, errorText: void 0 });
+    },
+    createFile() {
+      const file = current();
+      if (!file || !file.missing) return;
+      update({ creating: true, draft: "", original: "", dirty: false, errorText: void 0 });
+    },
+    async cancel() {
+      const file = current();
+      if (!file || !agentId) return;
+      update({ status: "loading", errorText: void 0, conflict: void 0, saved: false });
+      try {
+        const content = await fetchContent(file.name);
+        cache.set(cacheKey(file.name), editorFor(file.name, content));
+        markMissing(file.name, content === void 0);
+        notify();
+      } catch (error) {
+        handleFailure(error, LOAD_FAILED);
+        update({ status: "ready" });
+      }
+    },
+    save: saveDraft,
+    async resolveConflict(choice) {
+      const file = current();
+      if (!file?.conflict) return;
+      if (choice === "use-server") {
+        const server = file.conflict.server;
+        markMissing(file.name, false);
+        update({
+          conflict: void 0,
+          original: server,
+          draft: server,
+          dirty: false,
+          missing: false,
+          errorText: void 0
+        });
+        return;
+      }
+      update({ original: file.conflict.server, conflict: void 0, dirty: true });
+      await saveDraft();
+    }
+  };
+}
+const IDLE_STATE$1 = {
   status: "idle",
   agents: [],
   totalCount: 0,
@@ -816,7 +1115,7 @@ const NAVIGATION_KEYS = /* @__PURE__ */ new Set(["ArrowDown", "ArrowUp", "Home",
 const _AgentDirectory = class _AgentDirectory extends i {
   constructor() {
     super(...arguments);
-    this.state = IDLE_STATE;
+    this.state = IDLE_STATE$1;
     this.customHexError = false;
     this.handleQueryInput = (event) => {
       const input = event.target;
@@ -1013,6 +1312,311 @@ let AgentDirectory = _AgentDirectory;
 if (!customElements.get("agent-directory")) {
   customElements.define("agent-directory", AgentDirectory);
 }
+const _AgentOverview = class _AgentOverview extends i {
+  constructor() {
+    super(...arguments);
+    this.saving = false;
+    this.localError = "";
+  }
+  createRenderRoot() {
+    return this;
+  }
+  willUpdate(changed) {
+    if (!changed.has("agent")) return;
+    const previous = changed.get("agent");
+    if (previous?.id !== this.agent?.id) {
+      this.draftName = void 0;
+      this.draftModel = void 0;
+      this.localError = "";
+    }
+  }
+  render() {
+    const agent = this.agent;
+    if (!agent) {
+      return b`
+        <section class="overview" aria-label="Agent overview">
+          <p class="overview-empty" role="status">Select an agent to see its settings.</p>
+        </section>
+      `;
+    }
+    const editable = this.features?.updateAgent === true;
+    return b`
+      <section class="overview" aria-label="Agent overview">
+        <h3 class="overview-title">${agent.emoji ? `${agent.emoji} ` : ""}${agent.label}</h3>
+        <dl class="overview-facts">
+          ${editable ? A : this.renderFact("name", "Name", agent.label)}
+          ${this.renderFact("id", "Agent id", agent.id)}
+          ${this.renderFact("model", "Model", agent.model ?? "Gateway default")}
+          ${this.renderFact(
+      "workspace",
+      "Workspace",
+      agent.workspaceGit === void 0 ? "Not reported" : agent.workspaceGit ? "Git repository" : "Plain directory"
+    )}
+        </dl>
+        ${this.errorText || this.localError ? b`<p class="overview-error" role="alert">${this.localError || this.errorText}</p>` : A}
+        ${editable ? this.renderEditor(agent) : this.renderReadOnly()}
+      </section>
+    `;
+  }
+  renderFact(key, term, value) {
+    return b`
+      <div class="overview-fact" data-fact=${key}>
+        <dt>${term}</dt>
+        <dd>${value}</dd>
+      </div>
+    `;
+  }
+  renderEditor(agent) {
+    const name = this.draftName ?? agent.label;
+    const model = this.draftModel ?? agent.model ?? "";
+    const dirty = name !== agent.label || model !== (agent.model ?? "");
+    return b`
+      <div class="overview-editor">
+        <label for="overview-name">Display name</label>
+        <input
+          id="overview-name"
+          type="text"
+          maxlength="128"
+          spellcheck="false"
+          .value=${name}
+          ?disabled=${this.saving}
+          @input=${(event) => {
+      this.draftName = event.target.value;
+      this.localError = "";
+    }}
+        />
+        <label for="overview-model">Primary model</label>
+        <input
+          id="overview-model"
+          type="text"
+          maxlength="256"
+          spellcheck="false"
+          placeholder="Gateway default"
+          .value=${model}
+          ?disabled=${this.saving}
+          @input=${(event) => {
+      this.draftModel = event.target.value;
+      this.localError = "";
+    }}
+        />
+        <button
+          class="overview-save primary-action"
+          type="button"
+          ?disabled=${!dirty || this.saving}
+          @click=${() => this.submit(agent)}
+        >
+          ${this.saving ? "Saving" : "Save changes"}
+        </button>
+      </div>
+    `;
+  }
+  renderReadOnly() {
+    return b`
+      <p class="overview-notice" data-state="read-only" role="status">
+        This Gateway does not advertise agent updates. Change these settings from OpenClaw's
+        built-in Agents page.
+      </p>
+    `;
+  }
+  submit(agent) {
+    const name = (this.draftName ?? agent.label).trim();
+    const model = (this.draftModel ?? agent.model ?? "").trim();
+    if (!name) {
+      this.localError = "Name cannot be empty.";
+      return;
+    }
+    const detail = { agentId: agent.id };
+    if (name !== agent.label) detail.name = name;
+    if (model && model !== (agent.model ?? "")) detail.model = model;
+    if (Object.keys(detail).length < 2) return;
+    this.localError = "";
+    this.dispatchEvent(new CustomEvent("agent-update", { detail, bubbles: true }));
+  }
+};
+_AgentOverview.properties = {
+  agent: { attribute: false },
+  features: { attribute: false },
+  saving: { type: Boolean },
+  errorText: { attribute: false },
+  draftName: { state: true },
+  draftModel: { state: true },
+  localError: { state: true }
+};
+let AgentOverview = _AgentOverview;
+if (!customElements.get("agent-overview")) {
+  customElements.define("agent-overview", AgentOverview);
+}
+const IDLE_STATE = {
+  status: "idle",
+  files: [],
+  canSave: false,
+  expired: false
+};
+const _AgentPersona = class _AgentPersona extends i {
+  constructor() {
+    super(...arguments);
+    this.state = IDLE_STATE;
+    this.handleInput = (event) => {
+      const editor = event.target;
+      this.emit("persona-input", { text: editor.value });
+    };
+  }
+  createRenderRoot() {
+    return this;
+  }
+  render() {
+    const { status, errorText, file } = this.state;
+    return b`
+      <section class="persona" aria-label="Persona files">
+        ${status === "error" ? b`<p class="persona-error" role="alert">${errorText}</p>` : A}
+        ${status !== "error" ? this.renderTabs() : A}
+        ${this.state.expired ? b`<p class="persona-notice" data-state="expired" role="status">
+              Connection expired. Reconnect to continue editing; unsaved text is kept here.
+            </p>` : A}
+        ${!this.state.canSave && status !== "error" ? b`<p class="persona-notice" data-state="read-only" role="status">
+              This Gateway does not advertise agent file writes, so the editor is read-only.
+            </p>` : A}
+        ${file ? this.renderFile(file) : A}
+      </section>
+    `;
+  }
+  renderTabs() {
+    const entries = this.state.files.length ? this.state.files : PERSONA_FILES.map((name) => ({ name, missing: true }));
+    return b`
+      <div class="persona-tabs" role="tablist" aria-label="Core files">
+        ${entries.map(
+      (entry) => b`
+            <button
+              class="persona-tab"
+              type="button"
+              role="tab"
+              data-file=${entry.name}
+              aria-selected=${this.state.selected === entry.name ? "true" : "false"}
+              tabindex=${this.state.selected === entry.name ? 0 : -1}
+              @click=${() => this.emit("persona-select", { name: entry.name })}
+            >
+              ${entry.name}${entry.missing ? b`<span class="tab-flag" title="Not created yet">·</span>` : A}
+            </button>
+          `
+    )}
+      </div>
+    `;
+  }
+  renderFile(file) {
+    if (file.status === "loading") {
+      return b`<p class="persona-notice" data-state="loading" role="status">
+        Loading ${file.name}…
+      </p>`;
+    }
+    const showCreate = file.missing && !file.creating;
+    return b`
+      ${file.errorText ? b`<p class="persona-error" role="alert">${file.errorText}</p>` : A}
+      ${file.saved && !file.dirty ? b`<p class="persona-notice" data-state="saved" role="status">Saved ${file.name}.</p>` : A}
+      ${file.dirty ? b`<p class="persona-notice" data-state="dirty" role="status">
+            Unsaved changes in ${file.name}.
+          </p>` : A}
+      ${showCreate ? b`
+            <div class="persona-missing" data-state="missing">
+              <p>${file.name} does not exist yet for this agent.</p>
+              <button
+                class="persona-create"
+                type="button"
+                ?disabled=${!this.state.canSave || this.state.expired}
+                @click=${() => this.emit("persona-create", {})}
+              >
+                Create file
+              </button>
+            </div>
+          ` : b`
+            <label class="visually-hidden" for="persona-editor">${file.name}</label>
+            <textarea
+              id="persona-editor"
+              class="persona-editor"
+              spellcheck="false"
+              .value=${file.draft}
+              ?disabled=${this.state.expired || file.conflict !== void 0}
+              ?readonly=${!this.state.canSave}
+              @input=${this.handleInput}
+            ></textarea>
+            ${this.state.canSave ? this.renderActions(file) : A}
+          `}
+      ${file.conflict ? this.renderConflict(file) : A}
+    `;
+  }
+  renderActions(file) {
+    const locked = this.state.expired || file.saving || file.conflict !== void 0;
+    return b`
+      <div class="persona-actions">
+        <button
+          class="persona-save primary-action"
+          type="button"
+          ?disabled=${!file.dirty || locked}
+          @click=${() => this.emit("persona-save", {})}
+        >
+          ${file.saving ? "Saving" : "Save"}
+        </button>
+        <button
+          class="persona-cancel quiet-action"
+          type="button"
+          ?disabled=${!file.dirty || locked}
+          @click=${() => this.emit("persona-cancel", {})}
+        >
+          Discard changes
+        </button>
+      </div>
+    `;
+  }
+  renderConflict(file) {
+    const conflict = file.conflict;
+    if (!conflict) return b``;
+    return b`
+      <div class="persona-conflict" role="alertdialog" aria-label=${`Conflict in ${file.name}`}>
+        <p class="conflict-lede">
+          ${file.name} changed on the server while you were editing. Choose which version to keep.
+        </p>
+        <div class="conflict-versions">
+          <div>
+            <h4>On the server</h4>
+            <pre class="conflict-server">${conflict.server}</pre>
+          </div>
+          <div>
+            <h4>Your version</h4>
+            <pre class="conflict-local">${conflict.local}</pre>
+          </div>
+        </div>
+        <div class="persona-actions">
+          <button
+            class="conflict-keep primary-action"
+            type="button"
+            @click=${() => this.emitResolution("keep-mine")}
+          >
+            Overwrite with mine
+          </button>
+          <button
+            class="conflict-discard quiet-action"
+            type="button"
+            @click=${() => this.emitResolution("use-server")}
+          >
+            Use the server version
+          </button>
+        </div>
+      </div>
+    `;
+  }
+  emitResolution(choice) {
+    this.emit("persona-resolve", { choice });
+  }
+  emit(type, detail) {
+    this.dispatchEvent(new CustomEvent(type, { detail, bubbles: true }));
+  }
+};
+_AgentPersona.properties = {
+  state: { attribute: false }
+};
+let AgentPersona = _AgentPersona;
+if (!customElements.get("agent-persona")) {
+  customElements.define("agent-persona", AgentPersona);
+}
 const _AgentStudioApp = class _AgentStudioApp extends i {
   constructor() {
     super(...arguments);
@@ -1025,6 +1629,8 @@ const _AgentStudioApp = class _AgentStudioApp extends i {
     this.mounted = false;
     this.lifecycleGeneration = 0;
     this.disconnects = /* @__PURE__ */ new Map();
+    this.workspaceTab = "overview";
+    this.personaSyncing = false;
     this.handleTokenKeydown = (event) => {
       if (event.key !== "Enter" || event.isComposing) return;
       event.preventDefault();
@@ -1087,6 +1693,31 @@ const _AgentStudioApp = class _AgentStudioApp extends i {
     this.handleAgentColor = (event) => {
       const { agentId, color } = event.detail;
       void this.directory?.setColor(agentId, color);
+    };
+    this.handleAgentUpdate = (event) => {
+      const { agentId, name, model } = event.detail;
+      void this.directory?.updateAgent(agentId, { name, model });
+    };
+    this.handlePersonaSelect = (event) => {
+      const { name } = event.detail;
+      void this.persona?.selectFile(name);
+    };
+    this.handlePersonaInput = (event) => {
+      const { text } = event.detail;
+      this.persona?.setDraft(text);
+    };
+    this.handlePersonaSave = () => {
+      void this.persona?.save();
+    };
+    this.handlePersonaCancel = () => {
+      void this.persona?.cancel();
+    };
+    this.handlePersonaCreate = () => {
+      this.persona?.createFile();
+    };
+    this.handlePersonaResolve = (event) => {
+      const { choice } = event.detail;
+      void this.persona?.resolveConflict(choice);
     };
   }
   connectedCallback() {
@@ -1248,20 +1879,65 @@ const _AgentStudioApp = class _AgentStudioApp extends i {
           </aside>
 
           <main id="agent-workspace" class="agent-workspace" aria-label="Agent workspace">
-            <div class="workspace-header" aria-hidden="true">
-              <span class="workspace-kicker">Workspace / no selection</span>
+            <div class="workspace-header">
+              <span class="workspace-kicker">
+                Workspace / ${this.directoryState?.selectedAgent?.label ?? "no selection"}
+              </span>
               <span class="header-rule"></span>
             </div>
-            <section class="workspace-placeholder" aria-labelledby="workspace-empty-title">
-              <div class="radar-mark" aria-hidden="true"><span></span></div>
-              <p class="eyebrow">Standing by</p>
-              <h1 id="workspace-empty-title">Select an agent to begin</h1>
-              <p>
-                Agent overview, persona controls, and session tools will occupy this workspace.
-              </p>
-            </section>
+            ${this.directoryState?.selectedAgent ? this.renderAgentWorkspace() : b`
+                  <section class="workspace-placeholder" aria-labelledby="workspace-empty-title">
+                    <div class="radar-mark" aria-hidden="true"><span></span></div>
+                    <p class="eyebrow">Standing by</p>
+                    <h1 id="workspace-empty-title">Select an agent to begin</h1>
+                    <p>
+                      Agent overview, persona controls, and session tools will occupy this
+                      workspace.
+                    </p>
+                  </section>
+                `}
           </main>
         </div>
+      </div>
+    `;
+  }
+  renderAgentWorkspace() {
+    const agent = this.directoryState?.selectedAgent;
+    return b`
+      <div class="workspace-body">
+        <div id="workspace-tabs" class="workspace-tabs" role="tablist" aria-label="Agent sections">
+          ${["overview", "persona"].map(
+      (tab) => b`
+              <button
+                class="workspace-tab"
+                type="button"
+                role="tab"
+                data-tab=${tab}
+                aria-selected=${this.workspaceTab === tab ? "true" : "false"}
+                tabindex=${this.workspaceTab === tab ? 0 : -1}
+                @click=${() => {
+        this.workspaceTab = tab;
+      }}
+              >
+                ${tab === "overview" ? "Overview" : "Persona"}
+              </button>
+            `
+    )}
+        </div>
+        ${this.workspaceTab === "overview" ? b`<agent-overview
+              .agent=${agent}
+              .features=${this.features}
+              .errorText=${this.directoryState?.updateErrorText}
+              @agent-update=${this.handleAgentUpdate}
+            ></agent-overview>` : b`<agent-persona
+              .state=${this.personaState ?? { status: "idle", files: [], canSave: false, expired: false }}
+              @persona-select=${this.handlePersonaSelect}
+              @persona-input=${this.handlePersonaInput}
+              @persona-save=${this.handlePersonaSave}
+              @persona-cancel=${this.handlePersonaCancel}
+              @persona-create=${this.handlePersonaCreate}
+              @persona-resolve=${this.handlePersonaResolve}
+            ></agent-persona>`}
       </div>
     `;
   }
@@ -1279,6 +1955,12 @@ const _AgentStudioApp = class _AgentStudioApp extends i {
       this.directoryState = state;
     });
     this.directoryState = store.getState();
+    const persona = createPersonaStore({ api: this.api, connectionId, features });
+    this.persona = persona;
+    this.unsubscribePersona = persona.subscribe((state) => {
+      if (!this.isCurrentLifecycle(generation) || this.persona !== persona) return;
+      this.personaState = state;
+    });
     void store.load();
   }
   stopDirectory() {
@@ -1286,6 +1968,33 @@ const _AgentStudioApp = class _AgentStudioApp extends i {
     this.unsubscribeDirectory = void 0;
     this.directory = void 0;
     this.directoryState = void 0;
+    this.unsubscribePersona?.();
+    this.unsubscribePersona = void 0;
+    this.persona = void 0;
+    this.personaState = void 0;
+    this.workspaceTab = "overview";
+  }
+  updated() {
+    this.syncPersona();
+  }
+  /** Loads persona files only once the operator actually opens the Persona tab. */
+  syncPersona() {
+    const agentId = this.directoryState?.selectedId;
+    const persona = this.persona;
+    if (this.workspaceTab !== "persona" || !agentId || !persona || this.personaSyncing) return;
+    if (this.personaState?.agentId !== agentId) {
+      this.personaSyncing = true;
+      void persona.selectAgent(agentId).then(() => this.selectFirstPersonaFile()).finally(() => {
+        this.personaSyncing = false;
+      });
+      return;
+    }
+    void this.selectFirstPersonaFile();
+  }
+  async selectFirstPersonaFile() {
+    const state = this.persona?.getState();
+    if (!this.persona || !state || state.status !== "ready" || state.selected) return;
+    await this.persona.selectFile(PERSONA_FILES[0]);
   }
   isCurrentLifecycle(generation) {
     return this.mounted && generation === this.lifecycleGeneration;
@@ -1318,7 +2027,9 @@ _AgentStudioApp.properties = {
   drawerOpen: { state: true },
   statusText: { state: true },
   errorText: { state: true },
-  directoryState: { state: true }
+  directoryState: { state: true },
+  personaState: { state: true },
+  workspaceTab: { state: true }
 };
 let AgentStudioApp = _AgentStudioApp;
 if (!customElements.get("agent-studio-app")) {

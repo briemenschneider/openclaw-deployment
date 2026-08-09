@@ -234,14 +234,14 @@ npm --prefix plugins/agent-studio test -- ui/agent-directory
 
 **Files:** overview/persona/editor components and tests.
 
-- [ ] Test lazy file loading, tabs for all supported core files, missing-file creation, dirty-state
+- [x] Test lazy file loading, tabs for all supported core files, missing-file creation, dirty-state
   warnings, cancel/reload, save success, validation error, and conflict handling.
-- [ ] Load only the selected file; cache it per agent for the panel session.
-- [ ] Before save, reload the server copy and compare it to the recorded original.
-- [ ] On conflict, show current server and local versions and require an explicit choice.
-- [ ] Disable editing when the connection expires while preserving unsaved text in memory until
+- [x] Load only the selected file; cache it per agent for the panel session.
+- [x] Before save, reload the server copy and compare it to the recorded original.
+- [x] On conflict, show current server and local versions and require an explicit choice.
+- [x] Disable editing when the connection expires while preserving unsaved text in memory until
   reconnect or panel close.
-- [ ] Implement only Overview controls backed by advertised public methods; mark the rest read-only
+- [x] Implement only Overview controls backed by advertised public methods; mark the rest read-only
   or link to the built-in page.
 
 Run:

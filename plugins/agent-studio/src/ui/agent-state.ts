@@ -50,6 +50,12 @@ export type DirectoryAgent = {
   emoji?: string;
   model?: string;
   color?: string;
+  workspaceGit?: boolean;
+};
+
+export type AgentUpdatePatch = {
+  name?: string;
+  model?: string;
 };
 
 export type AgentDirectoryStatus = "idle" | "loading" | "ready" | "error";
@@ -62,8 +68,11 @@ export type AgentDirectoryState = {
   totalCount: number;
   query: string;
   selectedId?: string;
+  /** The selected agent even when the current search filter hides it. */
+  selectedAgent?: DirectoryAgent;
   errorText?: string;
   colorErrorText?: string;
+  updateErrorText?: string;
 };
 
 export type AgentDirectoryStore = {
@@ -73,6 +82,7 @@ export type AgentDirectoryStore = {
   select(agentId: string): void;
   setQuery(query: string): void;
   setColor(agentId: string, color: string): Promise<void>;
+  updateAgent(agentId: string, patch: AgentUpdatePatch): Promise<void>;
 };
 
 export type AgentDirectoryStoreOptions = {
@@ -85,6 +95,7 @@ const LIST_UNAVAILABLE = "This Gateway does not expose agent listing.";
 const LIST_FAILED = "Agent directory unavailable.";
 const COLOR_INVALID = "Enter a color as #rrggbb.";
 const COLOR_FAILED = "Could not save that color. Reverting.";
+const UPDATE_FAILED = "Could not update this agent.";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -103,6 +114,7 @@ function parseAgent(value: unknown): DirectoryAgent | undefined {
     label: optionalString(identity?.name) ?? optionalString(value.name) ?? value.id,
     emoji: optionalString(identity?.emoji),
     model: optionalString(model?.primary),
+    workspaceGit: typeof value.workspaceGit === "boolean" ? value.workspaceGit : undefined,
   };
 }
 
@@ -159,6 +171,7 @@ export function createAgentDirectoryStore(options: AgentDirectoryStoreOptions): 
   let selectedId: string | undefined;
   let errorText: string | undefined;
   let colorErrorText: string | undefined;
+  let updateErrorText: string | undefined;
 
   function snapshot(): AgentDirectoryState {
     return {
@@ -167,8 +180,10 @@ export function createAgentDirectoryStore(options: AgentDirectoryStoreOptions): 
       totalCount: all.length,
       query,
       selectedId,
+      selectedAgent: all.find((agent) => agent.id === selectedId),
       errorText,
       colorErrorText,
+      updateErrorText,
     };
   }
 
@@ -267,6 +282,36 @@ export function createAgentDirectoryStore(options: AgentDirectoryStoreOptions): 
       } catch {
         all = all.map((agent) => (agent.id === agentId ? { ...agent, color: previous } : agent));
         colorErrorText = COLOR_FAILED;
+        notify();
+      }
+    },
+
+    async updateAgent(agentId, patch) {
+      const index = all.findIndex((agent) => agent.id === agentId);
+      if (index < 0) return;
+      const payload: Record<string, unknown> = { agentId };
+      if (patch.name !== undefined) payload.name = patch.name;
+      if (patch.model !== undefined) payload.model = patch.model;
+      if (Object.keys(payload).length < 2) return;
+
+      const previous = all[index];
+      all = all.map((agent) =>
+        agent.id === agentId
+          ? {
+              ...agent,
+              label: patch.name ?? agent.label,
+              model: patch.model ?? agent.model,
+            }
+          : agent,
+      );
+      updateErrorText = undefined;
+      notify();
+
+      try {
+        await api.operation(connectionId, "updateAgent", payload);
+      } catch {
+        all = all.map((agent) => (agent.id === agentId ? previous : agent));
+        updateErrorText = UPDATE_FAILED;
         notify();
       }
     },
