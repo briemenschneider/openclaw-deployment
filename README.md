@@ -134,6 +134,10 @@ Get-NetTCPConnection -State Listen -LocalPort 11434   # expect 127.0.0.1
 docker compose exec openclaw curl -s http://host.docker.internal:11435/v1/models
 ```
 
+Ollama serves the OpenAI-compat routes alongside its native API, so `/v1/models`
+is a convenient reachability probe. It does not imply the provider uses `/v1` —
+see [Provider config](#provider-config), which uses the native adapter.
+
 ### Provider config
 
 **The `{"ollama": {...}}` top-level block does not exist in 2026.7.1** and fails
@@ -145,11 +149,13 @@ schema validation. Providers live under `models.providers.<id>`:
     mode: "merge",
     providers: {
       ollama: {
-        baseUrl: "http://host.docker.internal:11435/v1",  // 11435 = forwarder
+        baseUrl: "http://host.docker.internal:11435",  // 11435 = forwarder, no /v1
         apiKey: "ollama-local",
-        api: "openai-responses",
+        api: "ollama",                                 // native adapter
         models: [
-          { id: "qwen3.6:27b", name: "Qwen 3.6 27B", contextWindow: 262144,
+          { id: "qwen3.6:27b", name: "Qwen 3.6 27B", contextWindow: 32768,
+            maxTokens: 8192, params: { num_ctx: 32768 },
+            compat: { supportsTools: true, thinkingFormat: "qwen" },
             cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
           // ...one entry per model; id + name are required
         ],
@@ -161,7 +167,9 @@ schema validation. Providers live under `models.providers.<id>`:
 
 Apply with `openclaw config patch --file <path>` (run `--dry-run` first). Already
 applied to this instance. Models must be declared explicitly — they are not
-auto-discovered. `contextWindow` values came from Ollama's `/api/show`.
+auto-discovered. `contextWindow` is deliberately set *below* the maximum
+`/api/show` reports, sized to what fits in VRAM alongside the agent baseline —
+see the sizing note below.
 
 **`cost` requires all four keys** (`input`, `output`, `cacheRead`, `cacheWrite`).
 Omitting `cacheRead`/`cacheWrite` passes `config patch --dry-run` (the config
@@ -178,9 +186,24 @@ docker compose exec openclaw node openclaw.mjs agent --agent main \
   --model "ollama/qwen3.5:9b" --message "Reply with exactly the word: WORKING"
 ```
 
-The `/v1` suffix and `api: "openai-responses"` are both required — without them
-OpenClaw shows 0/200k tokens and returns nothing. `apiKey` must be a non-empty
-string even though Ollama ignores it.
+**Use the native `api: "ollama"` adapter with no `/v1` suffix.** An earlier
+revision of this README said the opposite — that `/v1` and
+`api: "openai-responses"` were "both required" — which was true only of the
+first working configuration. The OpenAI-compat path produced hard failures that
+were fixed by switching to the native adapter, which is also what makes
+`compat.thinkingFormat` work. `apiKey` must still be a non-empty string even
+though Ollama ignores it.
+
+**Declare `num_ctx` and `contextWindow` together, and keep them equal.** Ollama's
+real context is 4096 unless `num_ctx` says otherwise, whatever `contextWindow`
+claims, while OpenClaw budgets against `contextWindow` — a mismatch truncates
+silently. Do not shrink the window to save memory either: a full-context agent
+has a ~12,785-token baseline before the user types anything, and baseline plus
+compaction reserve must fit. `docs/winevents-known-issues.md` has the measured
+numbers for both traps.
+
+`ollama-provider.patch.json5` is the machine-readable copy of this block and is
+kept byte-identical to the running instance; prefer it over the excerpt above.
 
 `host.docker.internal` is not automatic on Docker Engine; the `extra_hosts` entry
 in the compose file provides it.
