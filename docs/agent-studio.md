@@ -27,6 +27,21 @@ The token is never written to storage, a URL, a log line, a response body, or pl
 connection expires after 15 minutes idle, on explicit disconnect, when the Gateway closes, and when
 the panel iframe is removed.
 
+## Building from a fresh checkout
+
+`plugins/agent-studio/dist/` is a build artifact and is not tracked. The deploy script builds
+it for you; if you are running the tests directly, build first so the browser-backed panel
+test has something to serve:
+
+```powershell
+npm --prefix plugins/agent-studio ci
+npm --prefix plugins/agent-studio run build
+npm --prefix plugins/agent-studio test
+```
+
+Without a build that one test skips rather than fails, so the suite still passes on a clean
+checkout — but it is not exercising the real bundle.
+
 ## Deploying
 
 ```powershell

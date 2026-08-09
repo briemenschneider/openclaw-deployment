@@ -1,4 +1,10 @@
 node_modules/
 
+# Build output. Not tracked: the deploy script runs `npm ci && npm run build` and packs
+# from the fresh output, so nothing installs from the checkout. Committing it also meant
+# every rebuild changed the bundle's content hash and raised a new code-scanning alert
+# against the vendored library code inside it.
+dist/
+
 # npm pack output, produced by deploy-agent-studio.ps1
 *.tgz

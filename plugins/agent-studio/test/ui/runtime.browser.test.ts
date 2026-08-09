@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
@@ -86,9 +87,13 @@ async function startBuiltPanel(): Promise<{ port: number; requests: Array<Record
   return { port: address.port, requests };
 }
 
-// Needs a real browser: happy-dom cannot prove opaque-origin isolation. Skipped rather
-// than failed where none is installed, so the suite still runs on Linux/macOS/CI.
-describe.skipIf(!hasBrowser)("built panel in a real scripts-only browser frame", () => {
+// dist/ is a build artifact and is not tracked, so this exercises the panel only after
+// `npm run build`. It also needs a real browser: happy-dom cannot prove opaque-origin
+// isolation. Skipped rather than failed when either is missing, so the suite still runs
+// on a fresh checkout and on Linux/macOS/CI.
+const panelBuilt = existsSync(resolve(process.cwd(), "dist/ui/index.html"));
+
+describe.skipIf(!hasBrowser || !panelBuilt)("built panel in a real browser frame", () => {
   it("stays isolated, clears the token, and disconnects when its parent removes the iframe", async () => {
     if (!browserExecutable) throw new Error("unreachable: suite is skipped without a browser");
     const { port, requests } = await startBuiltPanel();
