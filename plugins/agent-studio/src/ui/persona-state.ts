@@ -1,0 +1,423 @@
+import { AgentStudioApiError, type AgentStudioApi, type AgentStudioFeatures } from "./api-client.js";
+
+/** Core files the pinned Gateway accepts for agents.files.get/set. */
+export const PERSONA_FILES = [
+  "AGENTS.md",
+  "SOUL.md",
+  "USER.md",
+  "IDENTITY.md",
+  "TOOLS.md",
+  "HEARTBEAT.md",
+  "BOOTSTRAP.md",
+  "MEMORY.md",
+] as const;
+
+export const MAX_PERSONA_CHARACTERS = 60_000;
+
+const FILES_UNAVAILABLE = "This Gateway does not expose agent files.";
+const LIST_FAILED = "Could not load this agent's files.";
+const LOAD_FAILED = "Could not load this file.";
+const SAVE_FAILED = "Could not save this file.";
+const TOO_LARGE = "This file is too large to save (60,000 characters max).";
+
+/**
+ * Cache-key separator. The broker's agent ids match /^[A-Za-z0-9][A-Za-z0-9._-]*$/ and
+ * names come from PERSONA_FILES, so a pipe cannot occur in either half and the two
+ * cannot be confused for one another. Plain ASCII on purpose: an earlier version used a
+ * raw control byte, which made git treat this file as binary and hid its diff.
+ */
+const KEY_SEPARATOR = "|";
+
+export type PersonaFileEntry = {
+  name: string;
+  missing: boolean;
+};
+
+export type PersonaConflict = {
+  server: string;
+  local: string;
+};
+
+export type PersonaEditorState = {
+  name: string;
+  status: "loading" | "ready" | "error";
+  missing: boolean;
+  /** A missing file the operator has chosen to create; the editor opens on an empty buffer. */
+  creating: boolean;
+  original: string;
+  draft: string;
+  dirty: boolean;
+  saving: boolean;
+  saved: boolean;
+  errorText?: string;
+  conflict?: PersonaConflict;
+};
+
+export type PersonaState = {
+  agentId?: string;
+  status: "idle" | "loading" | "ready" | "error";
+  errorText?: string;
+  files: PersonaFileEntry[];
+  selected?: string;
+  file?: PersonaEditorState;
+  canSave: boolean;
+  expired: boolean;
+};
+
+export type PersonaResolution = "keep-mine" | "use-server";
+
+export type PersonaStore = {
+  getState(): PersonaState;
+  subscribe(listener: (state: PersonaState) => void): () => void;
+  selectAgent(agentId: string): Promise<void>;
+  selectFile(name: string): Promise<void>;
+  setDraft(text: string): void;
+  createFile(): void;
+  cancel(): Promise<void>;
+  save(): Promise<void>;
+  resolveConflict(choice: PersonaResolution): Promise<void>;
+};
+
+export type PersonaStoreOptions = {
+  api: Pick<AgentStudioApi, "operation">;
+  connectionId: string;
+  features: AgentStudioFeatures;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isExpired(error: unknown): boolean {
+  return error instanceof AgentStudioApiError && error.code === "CONNECTION_EXPIRED";
+}
+
+function parseFileEntries(value: unknown): PersonaFileEntry[] {
+  const reported = new Map<string, boolean>();
+  if (isRecord(value) && Array.isArray(value.files)) {
+    for (const file of value.files) {
+      if (isRecord(file) && typeof file.name === "string") {
+        reported.set(file.name, file.missing === true);
+      }
+    }
+  }
+  return PERSONA_FILES.map((name) => ({
+    name,
+    missing: reported.get(name) ?? true,
+  }));
+}
+
+/** Returns the file content, or undefined when the Gateway reports it missing. */
+function parseFileContent(value: unknown): string | undefined {
+  if (!isRecord(value) || !isRecord(value.file)) return undefined;
+  if (value.file.missing === true) return undefined;
+  return typeof value.file.content === "string" ? value.file.content : "";
+}
+
+function editorFor(name: string, content: string | undefined): PersonaEditorState {
+  return {
+    name,
+    status: "ready",
+    missing: content === undefined,
+    creating: false,
+    original: content ?? "",
+    draft: content ?? "",
+    dirty: false,
+    saving: false,
+    saved: false,
+  };
+}
+
+export function createPersonaStore(options: PersonaStoreOptions): PersonaStore {
+  const { api, connectionId, features } = options;
+  const available = features.listAgentFiles && features.getAgentFile;
+  const listeners = new Set<(state: PersonaState) => void>();
+  const cache = new Map<string, PersonaEditorState>();
+
+  let agentId: string | undefined;
+  let status: PersonaState["status"] = "idle";
+  let errorText: string | undefined;
+  let files: PersonaFileEntry[] = [];
+  let selected: string | undefined;
+  let expired = false;
+  /**
+   * Bumped on every agent selection. Every request captures the agent it was issued
+   * for; results are applied to that agent's cache entry and only reach the visible
+   * state while it is still the selected one. Without this, a response that lands
+   * after an agent switch is attributed to - and can overwrite - the wrong agent.
+   */
+  let generation = 0;
+
+  function cacheKey(agent: string, name: string): string {
+    return `${agent}${KEY_SEPARATOR}${name}`;
+  }
+
+  function current(): PersonaEditorState | undefined {
+    return agentId && selected ? cache.get(cacheKey(agentId, selected)) : undefined;
+  }
+
+  function snapshot(): PersonaState {
+    const file = current();
+    return {
+      agentId,
+      status,
+      errorText,
+      files: files.map((entry) => ({ ...entry })),
+      selected,
+      file: file ? { ...file } : undefined,
+      canSave: features.setAgentFile,
+      expired,
+    };
+  }
+
+  function notify(): void {
+    const state = snapshot();
+    for (const listener of listeners) listener(state);
+  }
+
+  /** Patches a specific agent's editor entry, whether or not it is on screen. */
+  function patch(agent: string, name: string, changes: Partial<PersonaEditorState>): void {
+    const key = cacheKey(agent, name);
+    const existing = cache.get(key);
+    if (!existing) return;
+    cache.set(key, { ...existing, ...changes });
+    notify();
+  }
+
+  /** Patches the visible editor. Only for synchronous, user-initiated edits. */
+  function update(changes: Partial<PersonaEditorState>): void {
+    if (!agentId || !selected) return;
+    patch(agentId, selected, changes);
+  }
+
+  function markMissing(agent: string, name: string, missing: boolean): void {
+    if (agent !== agentId) return;
+    files = files.map((entry) => (entry.name === name ? { ...entry, missing } : entry));
+  }
+
+  function noteFailure(agent: string, name: string, error: unknown, message: string): void {
+    if (isExpired(error)) {
+      expired = true;
+      patch(agent, name, { saving: false });
+      return;
+    }
+    patch(agent, name, { saving: false, errorText: message });
+  }
+
+  async function fetchContent(agent: string, name: string): Promise<string | undefined> {
+    const response = await api.operation(connectionId, "getAgentFile", { agentId: agent, name });
+    return parseFileContent(response);
+  }
+
+  async function writeContent(agent: string, name: string, content: string): Promise<void> {
+    await api.operation(connectionId, "setAgentFile", { agentId: agent, name, content });
+  }
+
+  async function saveDraft(): Promise<void> {
+    const file = current();
+    const agent = agentId;
+    if (!file || !agent || !features.setAgentFile) return;
+    const name = file.name;
+
+    if (file.draft.length > MAX_PERSONA_CHARACTERS) {
+      patch(agent, name, { errorText: TOO_LARGE, saved: false });
+      return;
+    }
+
+    patch(agent, name, { saving: true, errorText: undefined, saved: false });
+
+    let serverContent: string | undefined;
+    try {
+      serverContent = await fetchContent(agent, name);
+    } catch (error) {
+      noteFailure(agent, name, error, SAVE_FAILED);
+      return;
+    }
+
+    if ((serverContent ?? "") !== file.original) {
+      patch(agent, name, {
+        saving: false,
+        conflict: { server: serverContent ?? "", local: file.draft },
+      });
+      return;
+    }
+
+    try {
+      await writeContent(agent, name, file.draft);
+    } catch (error) {
+      noteFailure(agent, name, error, SAVE_FAILED);
+      return;
+    }
+
+    markMissing(agent, name, false);
+    patch(agent, name, {
+      saving: false,
+      saved: true,
+      dirty: false,
+      missing: false,
+      creating: false,
+      original: file.draft,
+      conflict: undefined,
+    });
+  }
+
+  return {
+    getState: snapshot,
+
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+
+    async selectAgent(nextAgentId) {
+      generation += 1;
+      const requestGeneration = generation;
+      agentId = nextAgentId;
+      selected = undefined;
+      errorText = undefined;
+
+      if (!available) {
+        status = "error";
+        errorText = FILES_UNAVAILABLE;
+        files = [];
+        notify();
+        return;
+      }
+
+      status = "loading";
+      notify();
+
+      let entries: PersonaFileEntry[] | undefined;
+      let failure: unknown;
+      try {
+        entries = parseFileEntries(
+          await api.operation(connectionId, "listAgentFiles", { agentId: nextAgentId }),
+        );
+      } catch (error) {
+        failure = error;
+      }
+
+      // A slower response for an agent the operator has already left must not
+      // replace the current agent's file list.
+      if (requestGeneration !== generation) return;
+
+      if (entries) {
+        files = entries;
+        status = "ready";
+      } else {
+        if (isExpired(failure)) expired = true;
+        status = "error";
+        files = [];
+        errorText = LIST_FAILED;
+      }
+      notify();
+    },
+
+    async selectFile(name) {
+      const agent = agentId;
+      if (!agent || !available || !PERSONA_FILES.includes(name as (typeof PERSONA_FILES)[number])) {
+        return;
+      }
+      const requestGeneration = generation;
+      selected = name;
+
+      const key = cacheKey(agent, name);
+      if (cache.get(key)) {
+        notify();
+        return;
+      }
+
+      cache.set(key, {
+        name,
+        status: "loading",
+        missing: false,
+        creating: false,
+        original: "",
+        draft: "",
+        dirty: false,
+        saving: false,
+        saved: false,
+      });
+      notify();
+
+      try {
+        const content = await fetchContent(agent, name);
+        cache.set(key, editorFor(name, content));
+        markMissing(agent, name, content === undefined);
+      } catch (error) {
+        if (isExpired(error)) expired = true;
+        cache.set(key, {
+          ...editorFor(name, ""),
+          status: "error",
+          errorText: LOAD_FAILED,
+        });
+      }
+      // The content belongs to `agent` either way; only the visible state is gated.
+      if (requestGeneration === generation) notify();
+    },
+
+    setDraft(text) {
+      const file = current();
+      if (!file) return;
+      update({ draft: text, dirty: text !== file.original, saved: false, errorText: undefined });
+    },
+
+    createFile() {
+      const file = current();
+      if (!file || !file.missing) return;
+      update({ creating: true, draft: "", original: "", dirty: false, errorText: undefined });
+    },
+
+    async cancel() {
+      const file = current();
+      const agent = agentId;
+      if (!file || !agent) return;
+      const name = file.name;
+      const requestGeneration = generation;
+
+      patch(agent, name, {
+        status: "loading",
+        errorText: undefined,
+        conflict: undefined,
+        saved: false,
+      });
+      try {
+        const content = await fetchContent(agent, name);
+        cache.set(cacheKey(agent, name), editorFor(name, content));
+        markMissing(agent, name, content === undefined);
+        if (requestGeneration === generation) notify();
+      } catch (error) {
+        noteFailure(agent, name, error, LOAD_FAILED);
+        patch(agent, name, { status: "ready" });
+      }
+    },
+
+    save: saveDraft,
+
+    async resolveConflict(choice) {
+      const file = current();
+      const agent = agentId;
+      if (!file?.conflict || !agent) return;
+      const name = file.name;
+
+      if (choice === "use-server") {
+        const server = file.conflict.server;
+        markMissing(agent, name, false);
+        patch(agent, name, {
+          conflict: undefined,
+          original: server,
+          draft: server,
+          dirty: false,
+          missing: false,
+          errorText: undefined,
+        });
+        return;
+      }
+      // keep-mine: adopt the server copy as the recorded original, then overwrite it.
+      patch(agent, name, { original: file.conflict.server, conflict: undefined, dirty: true });
+      await saveDraft();
+    },
+  };
+}
