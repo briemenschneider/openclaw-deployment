@@ -1,0 +1,16 @@
+{
+  "id": "agent-studio",
+  "name": "Agent Studio",
+  "description": "Operator workspace for Agent Studio.",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": []
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
