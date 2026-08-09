@@ -39,6 +39,11 @@ export class AgentStudioApp extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.teardown();
+  }
+
+  teardown(): void {
+    if (!this.mounted && !this.connectionId && !this.connecting && !this.disconnecting) return;
     this.mounted = false;
     this.lifecycleGeneration += 1;
     const connectionId = this.connectionId;

@@ -660,6 +660,10 @@ const _AgentStudioApp = class _AgentStudioApp extends i {
   }
   disconnectedCallback() {
     super.disconnectedCallback();
+    this.teardown();
+  }
+  teardown() {
+    if (!this.mounted && !this.connectionId && !this.connecting && !this.disconnecting) return;
     this.mounted = false;
     this.lifecycleGeneration += 1;
     const connectionId = this.connectionId;
@@ -853,4 +857,10 @@ if (!customElements.get("agent-studio-app")) {
 }
 const mount = document.querySelector("#agent-studio-root");
 if (!mount) throw new Error("Agent Studio mount point unavailable");
-mount.replaceChildren(document.createElement("agent-studio-app"));
+const app = document.createElement("agent-studio-app");
+const handlePageHide = () => {
+  window.removeEventListener("pagehide", handlePageHide);
+  app.teardown();
+};
+window.addEventListener("pagehide", handlePageHide);
+mount.replaceChildren(app);

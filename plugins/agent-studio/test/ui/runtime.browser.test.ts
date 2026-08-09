@@ -25,6 +25,7 @@ type BrowserFrame = {
 
 type BrowserPage = {
   close(): Promise<void>;
+  evaluate<T>(expression: string): Promise<T>;
   frames(): BrowserFrame[];
   goto(url: string, options?: { waitUntil: "domcontentloaded" }): Promise<unknown>;
 };
@@ -98,7 +99,7 @@ async function startBuiltPanel(): Promise<{ port: number; requests: Array<Record
 }
 
 describe("built panel in a real scripts-only browser frame", () => {
-  it("runs without storage or parent access, clears the token, and exposes the narrow drawer", async () => {
+  it("stays isolated, clears the token, and disconnects when its parent removes the iframe", async () => {
     if (!browserExecutable) throw new Error("Chrome or Edge executable is required for UI tests");
     const { port, requests } = await startBuiltPanel();
     const browser = await chromium.launch({ executablePath: browserExecutable, headless: true });
@@ -142,11 +143,7 @@ describe("built panel in a real scripts-only browser frame", () => {
       await panel.evaluate<void>("document.querySelector('#directory-toggle').click()");
       expect(await panel.evaluate<boolean>("document.querySelector('#agent-directory').hasAttribute('data-open')")).toBe(true);
 
-      expect(
-        await panel.evaluate<{ hasConnection: boolean; hasFeatures: boolean }>(
-          "(() => { const app = document.querySelector('agent-studio-app'); app.remove(); return { hasConnection: app.connectionId !== undefined, hasFeatures: app.features !== undefined }; })()",
-        ),
-      ).toEqual({ hasConnection: false, hasFeatures: false });
+      await page.evaluate<void>("document.querySelector('iframe').remove()");
       await expect.poll(() => requests.length).toBe(2);
       expect(requests.at(-1)).toEqual({ action: "disconnect" });
     } finally {
