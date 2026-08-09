@@ -1,11 +1,11 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { join, resolve, extname, sep, relative, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Buffer as Buffer$1 } from "node:buffer";
-import { GatewayClient } from "openclaw/plugin-sdk/gateway-runtime";
+import { createRequire } from "node:module";
 const STATE_VERSION = 1;
 const PLUGIN_STATE_DIRECTORY = "agent-studio";
 const COLORS_FILE = "colors.json";
@@ -21,7 +21,7 @@ class ColorStoreClosedError extends Error {
 function emptyState() {
   return { version: STATE_VERSION, agents: {} };
 }
-function isRecord$2(value) {
+function isRecord$3(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
@@ -33,7 +33,7 @@ function normalizeAgentColor(value) {
   return typeof value === "string" && COLOR_PATTERN.test(value) ? value.toLowerCase() : void 0;
 }
 function parseState(value) {
-  if (!isRecord$2(value) || value.version !== STATE_VERSION || !isRecord$2(value.agents)) return void 0;
+  if (!isRecord$3(value) || value.version !== STATE_VERSION || !isRecord$3(value.agents)) return void 0;
   const agents = {};
   for (const [agentId, color] of Object.entries(value.agents)) {
     const normalized = normalizeAgentColor(color);
@@ -162,7 +162,7 @@ const AGENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 function operationError(code, message) {
   return { ok: false, error: { code, message } };
 }
-function isRecord$1(value) {
+function isRecord$2(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
@@ -199,7 +199,7 @@ function copyKeys(value, keys) {
   return copy;
 }
 function validatePayload(operation, payload) {
-  if (!isRecord$1(payload)) return void 0;
+  if (!isRecord$2(payload)) return void 0;
   switch (operation) {
     case "listAgents":
       return hasExactlyKeys$1(payload, []) ? {} : void 0;
@@ -296,20 +296,20 @@ function copyStringArray(source, target, key) {
   if (Array.isArray(value)) target[key] = value.filter((entry) => typeof entry === "string");
 }
 function projectAgentIdentity(value) {
-  if (!isRecord$1(value)) return void 0;
+  if (!isRecord$2(value)) return void 0;
   const result = {};
   for (const key of ["name", "theme", "emoji", "avatar", "avatarUrl"]) copyString(value, result, key);
   return Object.keys(result).length > 0 ? result : void 0;
 }
 function projectAgentModel(value) {
-  if (!isRecord$1(value)) return void 0;
+  if (!isRecord$2(value)) return void 0;
   const result = {};
   copyString(value, result, "primary");
   copyStringArray(value, result, "fallbacks");
   return Object.keys(result).length > 0 ? result : void 0;
 }
 function projectAgent(value) {
-  if (!isRecord$1(value) || typeof value.id !== "string") return void 0;
+  if (!isRecord$2(value) || typeof value.id !== "string") return void 0;
   const result = { id: value.id };
   copyString(value, result, "name");
   copyBoolean(value, result, "workspaceGit");
@@ -320,7 +320,7 @@ function projectAgent(value) {
   return result;
 }
 function projectAgentsList(value) {
-  if (!isRecord$1(value)) return {};
+  if (!isRecord$2(value)) return {};
   const result = {};
   copyString(value, result, "defaultId");
   if (Array.isArray(value.agents)) {
@@ -329,14 +329,14 @@ function projectAgentsList(value) {
   return result;
 }
 function projectAgentUpdate(value) {
-  if (!isRecord$1(value)) return {};
+  if (!isRecord$2(value)) return {};
   const result = {};
   copyBoolean(value, result, "ok");
   copyString(value, result, "agentId");
   return result;
 }
 function projectAgentFile(value, includeContent) {
-  if (!isRecord$1(value) || typeof value.name !== "string") return void 0;
+  if (!isRecord$2(value) || typeof value.name !== "string") return void 0;
   const result = { name: value.name };
   copyBoolean(value, result, "missing");
   copyNumber(value, result, "size");
@@ -345,7 +345,7 @@ function projectAgentFile(value, includeContent) {
   return result;
 }
 function projectAgentFilesList(value) {
-  if (!isRecord$1(value)) return {};
+  if (!isRecord$2(value)) return {};
   const result = {};
   copyString(value, result, "agentId");
   if (Array.isArray(value.files)) {
@@ -354,7 +354,7 @@ function projectAgentFilesList(value) {
   return result;
 }
 function projectAgentFileResult(value, includeOk) {
-  if (!isRecord$1(value)) return {};
+  if (!isRecord$2(value)) return {};
   const result = {};
   if (includeOk) copyBoolean(value, result, "ok");
   copyString(value, result, "agentId");
@@ -363,7 +363,7 @@ function projectAgentFileResult(value, includeOk) {
   return result;
 }
 function projectModel(value) {
-  if (!isRecord$1(value) || typeof value.id !== "string" || typeof value.name !== "string" || typeof value.provider !== "string") {
+  if (!isRecord$2(value) || typeof value.id !== "string" || typeof value.name !== "string" || typeof value.provider !== "string") {
     return void 0;
   }
   const result = {
@@ -378,7 +378,7 @@ function projectModel(value) {
   return result;
 }
 function projectModelsList(value) {
-  if (!isRecord$1(value)) return {};
+  if (!isRecord$2(value)) return {};
   const result = {};
   if (Array.isArray(value.models)) {
     result.models = value.models.map(projectModel).filter((entry) => entry !== void 0);
@@ -386,7 +386,7 @@ function projectModelsList(value) {
   return result;
 }
 function projectSession(value) {
-  if (!isRecord$1(value) || typeof value.key !== "string") return void 0;
+  if (!isRecord$2(value) || typeof value.key !== "string") return void 0;
   const result = { key: value.key };
   for (const key of [
     "agentId",
@@ -409,7 +409,7 @@ function projectSession(value) {
   return result;
 }
 function projectSessionsList(value) {
-  if (!isRecord$1(value)) return {};
+  if (!isRecord$2(value)) return {};
   const result = {};
   for (const key of ["count", "totalCount", "limitApplied", "offset"]) copyNumber(value, result, key);
   copyNullableNumber(value, result, "nextOffset");
@@ -420,7 +420,7 @@ function projectSessionsList(value) {
   return result;
 }
 function projectSessionCreate(value) {
-  if (!isRecord$1(value)) return {};
+  if (!isRecord$2(value)) return {};
   const result = {};
   copyBoolean(value, result, "ok");
   copyString(value, result, "key");
@@ -484,7 +484,7 @@ function isColorOperation(value) {
   return value === "colors.list" || value === "colors.set";
 }
 async function executeColorOperation(colors, operation, payload) {
-  if (!isRecord$1(payload)) return colorOperationError("INVALID_PAYLOAD", "Invalid operation payload");
+  if (!isRecord$2(payload)) return colorOperationError("INVALID_PAYLOAD", "Invalid operation payload");
   if (operation === "colors.list") {
     if (!hasExactlyKeys$1(payload, [])) return colorOperationError("INVALID_PAYLOAD", "Invalid operation payload");
     try {
@@ -528,7 +528,7 @@ class ProtocolError extends Error {
     this.name = "ProtocolError";
   }
 }
-function isRecord(value) {
+function isRecord$1(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function hasExactlyKeys(value, expected) {
@@ -548,7 +548,7 @@ function parsePanelRequest(raw) {
   } catch {
     throw new ProtocolError();
   }
-  if (!isRecord(value) || typeof value.action !== "string") {
+  if (!isRecord$1(value) || typeof value.action !== "string") {
     throw new ProtocolError();
   }
   if (value.action === "connect") {
@@ -564,7 +564,7 @@ function parsePanelRequest(raw) {
     return { action: "disconnect", connectionId: value.connectionId };
   }
   if (value.action === "operation") {
-    if (!hasExactlyKeys(value, ["action", "connectionId", "operation", "payload"]) || !isConnectionId(value.connectionId) || typeof value.operation !== "string" || value.operation.length === 0 || value.operation.length > 128 || !isRecord(value.payload)) {
+    if (!hasExactlyKeys(value, ["action", "connectionId", "operation", "payload"]) || !isConnectionId(value.connectionId) || typeof value.operation !== "string" || value.operation.length === 0 || value.operation.length > 128 || !isRecord$1(value.payload)) {
       throw new ProtocolError();
     }
     return {
@@ -797,6 +797,264 @@ function createAgentStudioHttpHandler(options) {
     return await handleStatic(pathname, res, assetsRoot);
   };
 }
+const require$1 = createRequire(import.meta.url);
+const WebSocket = require$1("ws");
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function assertLoopbackWebSocketUrl(rawUrl) {
+  let url;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new Error("Gateway URL must use loopback WebSocket transport");
+  }
+  const loopback = url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]";
+  if (url.protocol !== "ws:" && url.protocol !== "wss:" || !loopback || url.username || url.password) {
+    throw new Error("Gateway URL must use loopback WebSocket transport");
+  }
+}
+function stableError(message) {
+  const error = new Error(message);
+  error.name = "GatewayConnectionError";
+  return error;
+}
+function parseFrame(data) {
+  try {
+    return JSON.parse(data.toString());
+  } catch {
+    return void 0;
+  }
+}
+function isResponseFrame(value) {
+  return isRecord(value) && value.type === "res" && typeof value.id === "string" && typeof value.ok === "boolean";
+}
+function isHelloOk(value) {
+  if (!isRecord(value) || value.type !== "hello-ok" || !isRecord(value.auth)) return false;
+  if (value.auth.role !== "operator" || !Array.isArray(value.auth.scopes)) return false;
+  return value.auth.scopes.includes("operator.read") && value.auth.scopes.includes("operator.write");
+}
+class LoopbackGatewayConnection {
+  #url;
+  #scopes;
+  #onHelloOk;
+  #onConnectError;
+  #onClose;
+  #pending = /* @__PURE__ */ new Map();
+  #credential;
+  #socket;
+  #started = false;
+  #stopped = false;
+  #authenticated = false;
+  #connectSent = false;
+  #connectFailureNotified = false;
+  #closeNotified = false;
+  #stopPromise;
+  #resolveStop;
+  #terminateTimer;
+  constructor(options) {
+    assertLoopbackWebSocketUrl(options.url);
+    this.#url = options.url;
+    this.#credential = options.token;
+    this.#scopes = [...options.scopes];
+    this.#onHelloOk = options.onHelloOk;
+    this.#onConnectError = options.onConnectError;
+    this.#onClose = options.onClose;
+  }
+  start() {
+    if (this.#started || this.#stopped) return;
+    this.#started = true;
+    let credential = this.#credential;
+    this.#credential = void 0;
+    const socket = new WebSocket(this.#url);
+    this.#socket = socket;
+    socket.on("message", (data) => {
+      const frame = parseFrame(data);
+      if (!this.#connectSent && isRecord(frame) && frame.type === "event" && frame.event === "connect.challenge") {
+        const event = frame;
+        const nonce = isRecord(event.payload) && typeof event.payload.nonce === "string" ? event.payload.nonce.trim() : "";
+        if (!nonce || !credential) {
+          credential = void 0;
+          this.#failAuthentication();
+          return;
+        }
+        this.#connectSent = true;
+        const connectPromise = this.#sendRequest("connect", {
+          minProtocol: 4,
+          maxProtocol: 4,
+          client: {
+            id: "gateway-client",
+            version: "0.1.0",
+            platform: process.platform,
+            mode: "backend"
+          },
+          caps: [],
+          auth: { token: credential },
+          role: "operator",
+          scopes: [...this.#scopes]
+        }, { timeoutMs: null });
+        credential = void 0;
+        connectPromise.then((hello) => {
+          if (!isHelloOk(hello)) {
+            this.#failAuthentication();
+            return;
+          }
+          this.#authenticated = true;
+          try {
+            this.#onHelloOk?.(hello);
+          } catch {
+          }
+        }).catch(() => this.#failAuthentication());
+        return;
+      }
+      this.#handleFrame(frame);
+    });
+    socket.on("close", (code, reason) => {
+      credential = void 0;
+      if (this.#socket === socket) this.#socket = void 0;
+      this.#rejectPending(stableError("Gateway connection closed"));
+      if (!this.#authenticated && !this.#stopped) this.#notifyConnectError();
+      this.#notifyClose(code, reason.toString());
+      this.#finishStop();
+    });
+    socket.on("error", () => {
+      if (!this.#authenticated) this.#notifyConnectError();
+    });
+  }
+  request(method, params, options) {
+    if (!this.#authenticated || this.#stopped) {
+      return Promise.reject(stableError("Gateway connection unavailable"));
+    }
+    return this.#sendRequest(method, params, options);
+  }
+  async stopAndWait() {
+    if (this.#stopPromise) return this.#stopPromise;
+    this.#stopped = true;
+    this.#credential = void 0;
+    this.#rejectPending(stableError("Gateway connection stopped"));
+    const socket = this.#socket;
+    if (!socket || socket.readyState === WebSocket.CLOSED) return;
+    this.#stopPromise = new Promise((resolve2) => {
+      this.#resolveStop = resolve2;
+    });
+    this.#terminateTimer = setTimeout(() => {
+      try {
+        socket.terminate();
+      } catch {
+        this.#finishStop();
+      }
+    }, 1e3);
+    this.#terminateTimer.unref?.();
+    try {
+      if (socket.readyState === WebSocket.CLOSING) return this.#stopPromise;
+      socket.close();
+    } catch {
+      socket.terminate();
+    }
+    return this.#stopPromise;
+  }
+  #sendRequest(method, params, options) {
+    const socket = this.#socket;
+    if (!socket || this.#stopped) return Promise.reject(stableError("Gateway connection unavailable"));
+    const id = randomUUID();
+    const timeoutMs = options?.timeoutMs === void 0 ? 3e4 : options.timeoutMs;
+    const promise = new Promise((resolve2, reject) => {
+      const pending = {
+        resolve: resolve2,
+        reject,
+        expectFinal: options?.expectFinal === true,
+        onAccepted: options?.onAccepted
+      };
+      if (typeof timeoutMs === "number" && timeoutMs >= 0) {
+        pending.timer = setTimeout(() => {
+          this.#pending.delete(id);
+          pending.removeAbort?.();
+          reject(stableError("Gateway request timed out"));
+        }, timeoutMs);
+        pending.timer.unref?.();
+      }
+      if (options?.signal) {
+        const abort = () => {
+          this.#pending.delete(id);
+          if (pending.timer) clearTimeout(pending.timer);
+          reject(stableError("Gateway request cancelled"));
+        };
+        options.signal.addEventListener("abort", abort, { once: true });
+        pending.removeAbort = () => options.signal?.removeEventListener("abort", abort);
+      }
+      this.#pending.set(id, pending);
+    });
+    try {
+      socket.send(JSON.stringify({ type: "req", id, method, params }));
+    } catch {
+      const pending = this.#pending.get(id);
+      if (pending) {
+        this.#pending.delete(id);
+        this.#cleanupPending(pending);
+        pending.reject(stableError("Gateway connection unavailable"));
+      }
+    }
+    return promise;
+  }
+  #handleFrame(frame) {
+    if (!isResponseFrame(frame)) return;
+    const pending = this.#pending.get(frame.id);
+    if (!pending) return;
+    if (pending.expectFinal && isRecord(frame.payload) && frame.payload.status === "accepted") {
+      try {
+        pending.onAccepted?.(frame.payload);
+      } catch {
+      }
+      return;
+    }
+    this.#pending.delete(frame.id);
+    this.#cleanupPending(pending);
+    if (frame.ok) pending.resolve(frame.payload);
+    else pending.reject(stableError("Gateway request failed"));
+  }
+  #failAuthentication() {
+    this.#credential = void 0;
+    this.#notifyConnectError();
+    try {
+      this.#socket?.close(1008, "authentication failed");
+    } catch {
+      this.#socket?.terminate();
+    }
+  }
+  #notifyConnectError() {
+    if (this.#connectFailureNotified) return;
+    this.#connectFailureNotified = true;
+    try {
+      this.#onConnectError?.(stableError("Gateway authentication failed"));
+    } catch {
+    }
+  }
+  #notifyClose(code, reason) {
+    if (this.#closeNotified) return;
+    this.#closeNotified = true;
+    try {
+      this.#onClose?.(code, reason);
+    } catch {
+    }
+  }
+  #rejectPending(error) {
+    for (const pending of this.#pending.values()) {
+      this.#cleanupPending(pending);
+      pending.reject(error);
+    }
+    this.#pending.clear();
+  }
+  #cleanupPending(pending) {
+    if (pending.timer) clearTimeout(pending.timer);
+    pending.removeAbort?.();
+  }
+  #finishStop() {
+    if (this.#terminateTimer) clearTimeout(this.#terminateTimer);
+    this.#terminateTimer = void 0;
+    this.#resolveStop?.();
+    this.#resolveStop = void 0;
+  }
+}
 const PANEL_IDLE_TIMEOUT_MS = 15 * 6e4;
 const DEFAULT_GLOBAL_CONNECTION_LIMIT = 32;
 const DEFAULT_PER_IP_CONNECTION_LIMIT = 4;
@@ -805,6 +1063,12 @@ const DEFAULT_ATTEMPT_WINDOW_MS = 6e4;
 const DEFAULT_CONNECT_TIMEOUT_MS = 1e4;
 function errorResult(code, message) {
   return { ok: false, error: { code, message } };
+}
+function readAdvertisedMethods(hello) {
+  if (typeof hello !== "object" || hello === null || !("features" in hello)) return /* @__PURE__ */ new Set();
+  const features = hello.features;
+  if (typeof features !== "object" || features === null || !("methods" in features)) return /* @__PURE__ */ new Set();
+  return new Set(Array.isArray(features.methods) ? features.methods.filter((value) => typeof value === "string") : []);
 }
 function assertLoopbackGatewayUrl(rawUrl) {
   let url;
@@ -834,7 +1098,7 @@ class PanelSessionBroker {
   constructor(options) {
     assertLoopbackGatewayUrl(options.gatewayUrl);
     this.#gatewayUrl = options.gatewayUrl;
-    this.#createGatewayClient = options.createGatewayClient ?? ((clientOptions) => new GatewayClient(clientOptions));
+    this.#createGatewayClient = options.createGatewayClient ?? ((clientOptions) => new LoopbackGatewayConnection(clientOptions));
     this.#log = (event) => {
       try {
         options.log?.(event);
@@ -871,19 +1135,10 @@ class PanelSessionBroker {
     });
     const clientOptions = {
       url: this.#gatewayUrl,
-      token: credential,
-      role: "operator",
+      token,
       scopes: ["operator.read", "operator.write"],
-      clientName: "gateway-client",
-      mode: "backend",
-      deviceIdentity: null,
-      hostDeps: {
-        logDebug: () => void 0,
-        logError: () => void 0,
-        redactForLog: () => "[redacted]"
-      },
       onHelloOk: (hello2) => {
-        advertisedMethods = new Set(hello2.features.methods);
+        advertisedMethods = readAdvertisedMethods(hello2);
         resolveHello();
       },
       onConnectError: (error) => rejectHello(error),

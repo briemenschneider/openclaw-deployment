@@ -1,11 +1,13 @@
 import { randomBytes } from "node:crypto";
-import { GatewayClient } from "openclaw/plugin-sdk/gateway-runtime";
 import {
   deriveGatewayOperationFeatures,
   type GatewayOperationFeatures,
 } from "./gateway-operations.js";
-
-type GatewayClientOptions = ConstructorParameters<typeof GatewayClient>[0];
+import {
+  LoopbackGatewayConnection,
+  type GatewayConnectionClient,
+  type LoopbackGatewayConnectionOptions,
+} from "./gateway-connection.js";
 
 export const PANEL_IDLE_TIMEOUT_MS = 15 * 60_000;
 export const DEFAULT_GLOBAL_CONNECTION_LIMIT = 32;
@@ -14,8 +16,10 @@ export const DEFAULT_ATTEMPT_LIMIT = 5;
 export const DEFAULT_ATTEMPT_WINDOW_MS = 60_000;
 export const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
 
-export type GatewayClientLike = Pick<GatewayClient, "request" | "start" | "stopAndWait">;
-export type GatewayClientFactory = (options: GatewayClientOptions) => GatewayClientLike;
+export type GatewayClientLike = GatewayConnectionClient;
+export type GatewayClientFactory = (
+  options: LoopbackGatewayConnectionOptions,
+) => GatewayClientLike;
 
 export type PanelSessionLimits = {
   globalConnections: number;
@@ -64,6 +68,13 @@ function errorResult(code: BrokerErrorCode, message: string): BrokerErrorResult 
   return { ok: false, error: { code, message } };
 }
 
+function readAdvertisedMethods(hello: unknown): Set<string> {
+  if (typeof hello !== "object" || hello === null || !("features" in hello)) return new Set();
+  const features = hello.features;
+  if (typeof features !== "object" || features === null || !("methods" in features)) return new Set();
+  return new Set(Array.isArray(features.methods) ? features.methods.filter((value): value is string => typeof value === "string") : []);
+}
+
 function assertLoopbackGatewayUrl(rawUrl: string): void {
   let url: URL;
   try {
@@ -96,7 +107,8 @@ export class PanelSessionBroker {
     assertLoopbackGatewayUrl(options.gatewayUrl);
     this.#gatewayUrl = options.gatewayUrl;
     this.#createGatewayClient =
-      options.createGatewayClient ?? ((clientOptions) => new GatewayClient(clientOptions));
+      options.createGatewayClient ??
+      ((clientOptions) => new LoopbackGatewayConnection(clientOptions));
     this.#log = (event) => {
       try {
         options.log?.(event);
@@ -134,21 +146,12 @@ export class PanelSessionBroker {
       resolveHello = resolve;
       rejectHello = reject;
     });
-    const clientOptions: GatewayClientOptions = {
+    const clientOptions: LoopbackGatewayConnectionOptions = {
       url: this.#gatewayUrl,
-      token: credential,
-      role: "operator",
+      token,
       scopes: ["operator.read", "operator.write"],
-      clientName: "gateway-client",
-      mode: "backend",
-      deviceIdentity: null,
-      hostDeps: {
-        logDebug: () => undefined,
-        logError: () => undefined,
-        redactForLog: () => "[redacted]",
-      },
       onHelloOk: (hello) => {
-        advertisedMethods = new Set(hello.features.methods);
+        advertisedMethods = readAdvertisedMethods(hello);
         resolveHello();
       },
       onConnectError: (error) => rejectHello(error),

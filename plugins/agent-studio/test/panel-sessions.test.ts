@@ -1,3 +1,4 @@
+import { Session } from "node:inspector/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   PanelSessionBroker,
@@ -8,6 +9,53 @@ import { startFakeGateway, type FakeGateway } from "./fixtures/fake-gateway.js";
 
 const openFixtures = new Set<FakeGateway>();
 const openBrokers = new Set<PanelSessionBroker>();
+
+async function reachableOwnGraphContainsString(root: object, target: string): Promise<boolean> {
+  const session = new Session();
+  const globalKey = `__agentStudioInspect${Math.random().toString(16).slice(2)}`;
+  Object.defineProperty(globalThis, globalKey, { configurable: true, value: root });
+  session.connect();
+  try {
+    const evaluated = await session.post("Runtime.evaluate", {
+      expression: `globalThis[${JSON.stringify(globalKey)}]`,
+      objectGroup: globalKey,
+    });
+    if (!evaluated.result.objectId) return false;
+    const queue = [{ objectId: evaluated.result.objectId, depth: 0 }];
+    const seen = new Set<string>();
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (!current || seen.has(current.objectId)) continue;
+      seen.add(current.objectId);
+      const properties = await session.post("Runtime.getProperties", {
+        objectId: current.objectId,
+        ownProperties: true,
+        generatePreview: false,
+      });
+      const privateProperties = (
+        properties as typeof properties & {
+          privateProperties?: typeof properties.result;
+        }
+      ).privateProperties;
+      const values = [
+        ...properties.result.map((property) => property.value),
+        ...(privateProperties ?? []).map((property) => property.value),
+      ];
+      for (const value of values) {
+        if (!value) continue;
+        if (value.type === "string" && value.value === target) return true;
+        if (value.objectId && current.depth < 5) {
+          queue.push({ objectId: value.objectId, depth: current.depth + 1 });
+        }
+      }
+    }
+    return false;
+  } finally {
+    await session.post("Runtime.releaseObjectGroup", { objectGroup: globalKey }).catch(() => undefined);
+    session.disconnect();
+    Reflect.deleteProperty(globalThis, globalKey);
+  }
+}
 
 type ControlledClient = GatewayClientLike & {
   active: boolean;
@@ -102,6 +150,23 @@ describe("panel session broker", () => {
     openBrokers.delete(broker);
     await expect.poll(() => fixture.activeConnectionCount()).toBe(0);
     expect(broker.snapshot()).toEqual({ activeConnections: 0 });
+  });
+
+  it("does not retain the supplied token anywhere reachable after hello-ok", async () => {
+    const token = "agent-studio-test-token";
+    const fixture = await startFakeGateway();
+    openFixtures.add(fixture);
+    const broker = new PanelSessionBroker({ gatewayUrl: fixture.gatewayUrl });
+    openBrokers.add(broker);
+
+    const response = await broker.connect(token, "192.0.2.12");
+    if (!response.ok) throw new Error("expected connection");
+    const client = broker.getClient(response.connectionId);
+    if (!client) throw new Error("expected client");
+
+    const retained = await reachableOwnGraphContainsString({ broker, client }, token);
+
+    expect(retained).toBe(false);
   });
 
   it("stops the public GatewayClient on remote close before its reconnect timer fires", async () => {
