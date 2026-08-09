@@ -69,4 +69,31 @@ describe("Agent Studio registration", () => {
 
     expect(timersStarted).toBe(0);
   });
+
+  it("wires the registered prefix route to the panel handler", async () => {
+    const { routes } = register("full");
+    const route = routes[0] as {
+      handler: (request: unknown, response: unknown) => Promise<unknown> | unknown;
+    };
+    const headers = new Map<string, string | number>();
+    let body: Buffer | string | undefined;
+    const response = {
+      statusCode: 0,
+      setHeader(name: string, value: string | number) {
+        headers.set(name.toLowerCase(), value);
+      },
+      end(value?: Buffer | string) {
+        body = value;
+      },
+    };
+
+    await route.handler(
+      { method: "GET", url: "/plugins/agent-studio/", headers: {}, socket: {} },
+      response,
+    );
+
+    expect(response.statusCode).toBe(200);
+    expect(headers.get("content-type")).toBe("text/html; charset=utf-8");
+    expect(body?.toString()).toContain("Agent Studio");
+  });
 });
