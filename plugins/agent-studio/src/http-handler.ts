@@ -96,7 +96,8 @@ function sourceIpOf(req: IncomingMessage): string {
 }
 
 function isHashedAsset(name: string): boolean {
-  return /[.-][A-Za-z0-9_-]{8,}(?=\.)/.test(basename(name));
+  // Generated panel assets use: <stem>[.-]<lowercase hex hash of 8+ chars>.<extension>.
+  return /^.+[.-][a-f0-9]{8,}\.[a-z0-9]+$/.test(basename(name));
 }
 
 function decodeAssetPath(pathname: string): string | undefined {
@@ -140,32 +141,54 @@ async function readUtf8Body(req: IncomingMessage): Promise<ReadBodyResult> {
     if (Number(contentLength) > MAX_PANEL_REQUEST_BYTES) return { ok: false, status: 413 };
   }
 
-  const chunks: Buffer[] = [];
-  let size = 0;
-  let oversized = false;
-  try {
-    for await (const rawChunk of req) {
+  return await new Promise<ReadBodyResult>((resolveBody) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let settled = false;
+
+    const cleanup = (keepErrorGuard = false) => {
+      req.removeListener("data", onData);
+      req.removeListener("end", onEnd);
+      req.removeListener("aborted", onAborted);
+      if (!keepErrorGuard) req.removeListener("error", onError);
+    };
+    const settle = (result: ReadBodyResult, keepErrorGuard = false) => {
+      if (settled) return;
+      settled = true;
+      cleanup(keepErrorGuard);
+      if (keepErrorGuard) {
+        req.once("close", () => req.removeListener("error", onError));
+      }
+      resolveBody(result);
+    };
+    const onData = (rawChunk: Buffer | string) => {
       const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
       size += chunk.length;
       if (size > MAX_PANEL_REQUEST_BYTES) {
-        oversized = true;
-        continue;
+        req.pause();
+        settle({ ok: false, status: 413 }, true);
+        return;
       }
       chunks.push(chunk);
-    }
-  } catch {
-    return { ok: false, status: 400 };
-  }
-  if (oversized) return { ok: false, status: 413 };
-
-  try {
-    return {
-      ok: true,
-      body: new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)),
     };
-  } catch {
-    return { ok: false, status: 400 };
-  }
+    const onEnd = () => {
+      try {
+        settle({
+          ok: true,
+          body: new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)),
+        });
+      } catch {
+        settle({ ok: false, status: 400 });
+      }
+    };
+    const onAborted = () => settle({ ok: false, status: 400 });
+    const onError = () => settle({ ok: false, status: 400 });
+
+    req.on("data", onData);
+    req.once("end", onEnd);
+    req.once("aborted", onAborted);
+    req.once("error", onError);
+  });
 }
 
 async function handleApi(
@@ -182,7 +205,16 @@ async function handleApi(
   }
 
   const raw = await readUtf8Body(req);
-  if (!raw.ok) return endText(res, raw.status, raw.status === 413 ? "Payload too large" : "Bad request");
+  if (!raw.ok) {
+    if (raw.status === 413) {
+      res.setHeader("Connection", "close");
+      res.once("finish", () => {
+        if (typeof req.socket?.end === "function") req.socket.end();
+        else req.destroy();
+      });
+    }
+    return endText(res, raw.status, raw.status === 413 ? "Payload too large" : "Bad request");
+  }
 
   let request: PanelRequest;
   try {
@@ -217,6 +249,8 @@ async function handleStatic(
   res.setHeader("Content-Type", MIME_TYPES[extname(file).toLowerCase()] ?? "application/octet-stream");
   res.setHeader("Content-Length", body.length);
   res.setHeader("Content-Security-Policy", PANEL_CSP);
+  res.setHeader("Access-Control-Allow-Origin", "null");
+  res.setHeader("Vary", "Origin");
   res.setHeader("Referrer-Policy", "no-referrer");
   res.setHeader("X-Content-Type-Options", "nosniff");
   res.setHeader(
