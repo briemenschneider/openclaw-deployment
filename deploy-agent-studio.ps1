@@ -118,8 +118,14 @@ if ($suspicious) {
 }
 
 Write-Host 'checking the package contents...'
-$dryRun = & npm --prefix "$pluginRoot" pack --dry-run --json 2>&1
-if ($LASTEXITCODE -ne 0) { throw "npm pack --dry-run failed with exit code $LASTEXITCODE" }
+# npm pack ignores --prefix and always packs the current directory, so both pack
+# steps have to run from inside the plugin.
+Push-Location $pluginRoot
+try {
+    $dryRun = & npm pack --dry-run --json 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "npm pack --dry-run failed with exit code $LASTEXITCODE" }
+}
+finally { Pop-Location }
 $packed = ($dryRun | Out-String | ConvertFrom-Json)[0]
 $files = $packed.files.path
 foreach ($required in @('openclaw.plugin.json', 'dist/index.js', 'dist/ui/index.html')) {

@@ -302,8 +302,8 @@ docker compose exec -T openclaw openclaw plugins inspect agent-studio --runtime 
 
 ## Task 12: End-to-end acceptance and release gate
 
-- [ ] Run the full suite from a clean install.
-- [ ] Confirm the repository diff contains no OpenClaw core source or generated dashboard bundle.
+- [x] Run the full suite from a clean install.
+- [x] Confirm the repository diff contains no OpenClaw core source or generated dashboard bundle.
 - [ ] Open the real Agent Studio tab in the in-app browser and capture desktop and narrow-layout
   screenshots.
 - [ ] Verify wrong token, correct token, disconnect, idle expiry, and Gateway restart.
@@ -312,9 +312,19 @@ docker compose exec -T openclaw openclaw plugins inspect agent-studio --runtime 
 - [ ] Create one immediate and one advanced session and confirm each appears under the correct
   agent in OpenClaw's Sessions list.
 - [ ] Run keyboard-only and contrast checks.
-- [ ] Review logs and packaged files for the literal test token and other credential patterns.
-- [ ] Record the tested OpenClaw digest/version and package integrity hash in
+      Contrast: done — every text token is now ≥4.5:1 on the darkest surface, enforced by a test.
+      Keyboard: covered by tests for the directory; a manual pass over the whole panel is pending.
+- [x] Review logs and packaged files for the literal test token and other credential patterns.
+- [x] Record the tested OpenClaw digest/version and package integrity hash in
   `docs/agent-studio.md`.
+
+> Deployed 2026-08-09 to the pinned `2026.7.1` container: loaded, activated, one HTTP route, no
+> diagnostics. Route hardening was re-verified live (opaque-origin CSP, `Origin: null` only,
+> non-simple content types and `GET` rejected, encoded traversal rejected) and the Gateway log
+> carries no token, connection id, or credential-shaped string.
+>
+> The remaining boxes all require the Gateway token to be typed into the browser, so they are the
+> operator's to run; `docs/agent-studio.md` lists them.
 
 Release is blocked if any of these are true:
 

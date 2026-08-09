@@ -45,6 +45,18 @@ It never reads `.env` and never handles the Gateway token.
 Options: `-SkipTests` (iterating on the deploy steps only, never for a release) and `-SkipRestart`
 (install without activating).
 
+## Pin the plugin as trusted
+
+With `plugins.allow` unset, OpenClaw logs on every start that discovered non-bundled plugins may
+auto-load, and flags `agent-studio` as untracked local code. Pin the plugins you actually trust:
+
+```powershell
+wsl -e docker exec openclaw openclaw config set plugins.allow '["signal","agent-studio"]'
+```
+
+Include every non-bundled plugin you want loaded — an allowlist that omits one disables it. Check
+the current set first with `wsl -e docker exec openclaw openclaw plugins list --enabled --verbose`.
+
 ## First use
 
 1. Open the OpenClaw dashboard and select the **Agent Studio** tab.
@@ -105,9 +117,26 @@ clears plugin state.
 
 | Date | OpenClaw version / digest | Package SHA-256 |
 | --- | --- | --- |
-| _pending_ | _pending end-to-end acceptance (plan Task 12)_ | _pending_ |
+| 2026-08-09 | `2026.7.1` — `sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c` | `2a503a23d3fde5b5d63c5abad536678ba9b51ffdb9fed260ce8252f5384e669a` |
 
-The plugin has been built, typechecked, and tested against the pinned `2026.7.1` SDK, but the
-end-to-end acceptance run against the live container — real tab, wrong/right token, idle expiry,
-Gateway restart, colour persistence, a conflict, and both session paths — has not been performed
-yet. Fill this table in from that run.
+What that build was verified to do, against the live container:
+
+- installs from `npm-pack:` and reports `status: loaded`, `activated: true`, one HTTP route, no
+  diagnostics;
+- serves the panel with `sandbox allow-scripts`, `default-src 'none'`, `Access-Control-Allow-Origin:
+  null`, and `Cache-Control: no-store`, and serves hashed assets `immutable`;
+- rejects an API POST from a normal web origin (403), a non-simple content type (403), `GET` on the
+  API route (405), and a percent-encoded path traversal (400) — no file outside the panel is served;
+- leaves no token value, connection id, or credential-shaped string in the Gateway log.
+
+Still to confirm by hand — every one of these needs the Gateway token typed into the browser, which
+the operator must do:
+
+- wrong token rejected with a generic error, correct token connects, explicit disconnect works;
+- 15-minute idle expiry and Gateway restart both drop the panel to the token screen;
+- colours assigned to two agents survive a Gateway restart;
+- SOUL and USER edits on a disposable test agent save and reload, and an induced concurrent edit
+  produces the conflict panel;
+- an immediate session and an advanced session each appear under the right agent in the Sessions
+  list;
+- desktop and narrow-layout screenshots, and a keyboard-only pass.

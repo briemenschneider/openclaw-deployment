@@ -1,1 +1,4 @@
 node_modules/
+
+# npm pack output, produced by deploy-agent-studio.ps1
+*.tgz
