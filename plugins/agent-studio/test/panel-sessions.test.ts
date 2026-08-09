@@ -18,7 +18,9 @@ type ControlledClient = GatewayClientLike & {
 
 function controlledFactory(mode: "hello" | "error" | "manual" = "hello") {
   const clients: ControlledClient[] = [];
+  const optionsSeen: Parameters<GatewayClientFactory>[0][] = [];
   const createGatewayClient: GatewayClientFactory = (options) => {
+    optionsSeen.push(options);
     const client: ControlledClient = {
       active: false,
       stopCount: 0,
@@ -45,7 +47,7 @@ function controlledFactory(mode: "hello" | "error" | "manual" = "hello") {
     clients.push(client);
     return client;
   };
-  return { clients, createGatewayClient };
+  return { clients, createGatewayClient, optionsSeen };
 }
 
 afterEach(async () => {
@@ -92,6 +94,22 @@ describe("panel session broker", () => {
     expect(broker.snapshot()).toEqual({ activeConnections: 0 });
   });
 
+  it("stops the public GatewayClient on remote close before its reconnect timer fires", async () => {
+    const fixture = await startFakeGateway();
+    openFixtures.add(fixture);
+    const broker = new PanelSessionBroker({ gatewayUrl: fixture.gatewayUrl });
+    openBrokers.add(broker);
+    const response = await broker.connect("agent-studio-test-token", "192.0.2.11");
+    if (!response.ok) throw new Error("expected connection");
+
+    fixture.disconnectGatewayClients();
+    await expect.poll(() => broker.snapshot().activeConnections).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 1_250));
+
+    expect(fixture.connectAttempts).toHaveLength(1);
+    expect(fixture.activeConnectionCount()).toBe(0);
+  });
+
   it("sanitizes authentication failures, clears the credential reference, and closes the client", async () => {
     const token = "supplied-token-that-must-not-leak";
     const logs: unknown[] = [];
@@ -129,6 +147,69 @@ describe("panel session broker", () => {
     expect(broker.snapshot()).toEqual({ activeConnections: 0 });
     expect(logs).toEqual([{ action: "connect" }]);
     expect(JSON.stringify({ response, snapshot: broker.snapshot(), logs })).not.toContain(token);
+  });
+
+  it("clears successful credential references before registration and logging", async () => {
+    const token = "success-token-that-must-be-cleared";
+    const controlled = controlledFactory();
+    let tokenAtSuccessLog: string | undefined;
+    const broker = new PanelSessionBroker({
+      gatewayUrl: "ws://127.0.0.1:18789",
+      createGatewayClient: controlled.createGatewayClient,
+      log: (event) => {
+        if ("connectionId" in event && event.action === "connect") {
+          tokenAtSuccessLog = controlled.optionsSeen[0]?.token;
+        }
+      },
+    });
+    openBrokers.add(broker);
+
+    await expect(broker.connect(token, "192.0.2.21")).resolves.toMatchObject({ ok: true });
+
+    expect(tokenAtSuccessLog).toBeUndefined();
+    expect(controlled.optionsSeen[0]?.token).toBeUndefined();
+  });
+
+  it("isolates a throwing success logger without orphaning the registered session", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const controlled = controlledFactory();
+    const broker = new PanelSessionBroker({
+      gatewayUrl: "ws://127.0.0.1:18789",
+      createGatewayClient: controlled.createGatewayClient,
+      log: () => {
+        throw new Error("logger failed");
+      },
+    });
+    openBrokers.add(broker);
+
+    const response = await broker.connect("token", "192.0.2.22");
+
+    expect(response).toMatchObject({ ok: true });
+    expect(broker.snapshot()).toEqual({ activeConnections: 1 });
+    await broker.shutdown();
+    expect(controlled.clients[0]).toMatchObject({ active: false, stopCount: 1 });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("stops the client when the disconnect logger throws", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const controlled = controlledFactory();
+    const broker = new PanelSessionBroker({
+      gatewayUrl: "ws://127.0.0.1:18789",
+      createGatewayClient: controlled.createGatewayClient,
+      log: (event) => {
+        if (event.action === "disconnect") throw new Error("logger failed");
+      },
+    });
+    openBrokers.add(broker);
+    const response = await broker.connect("token", "192.0.2.23");
+    if (!response.ok) throw new Error("expected connection");
+
+    await expect(broker.disconnect(response.connectionId)).resolves.toEqual({ ok: true });
+
+    expect(controlled.clients[0]).toMatchObject({ active: false, stopCount: 1 });
+    expect(broker.snapshot()).toEqual({ activeConnections: 0 });
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("slides the 15-minute idle deadline on authenticated use and expires without live handles", async () => {
@@ -173,7 +254,7 @@ describe("panel session broker", () => {
     await broker.shutdown();
 
     expect(controlled.clients.map(({ active }) => active)).toEqual([false, false, false]);
-    expect(controlled.clients.map(({ stopCount }) => stopCount)).toEqual([1, 0, 1]);
+    expect(controlled.clients.map(({ stopCount }) => stopCount)).toEqual([1, 1, 1]);
     expect(broker.snapshot()).toEqual({ activeConnections: 0 });
     expect(vi.getTimerCount()).toBe(0);
   });

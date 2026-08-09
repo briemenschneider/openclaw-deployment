@@ -90,7 +90,13 @@ export class PanelSessionBroker {
     this.#gatewayUrl = options.gatewayUrl;
     this.#createGatewayClient =
       options.createGatewayClient ?? ((clientOptions) => new GatewayClient(clientOptions));
-    this.#log = options.log ?? (() => undefined);
+    this.#log = (event) => {
+      try {
+        options.log?.(event);
+      } catch {
+        // Logging must never own or interrupt client/session lifecycle.
+      }
+    };
     this.#limits = {
       globalConnections: options.limits?.globalConnections ?? DEFAULT_GLOBAL_CONNECTION_LIMIT,
       perIpConnections: options.limits?.perIpConnections ?? DEFAULT_PER_IP_CONNECTION_LIMIT,
@@ -156,6 +162,9 @@ export class PanelSessionBroker {
       );
       client.start();
       await hello;
+      token = "";
+      credential = undefined;
+      clientOptions.token = undefined;
       if (closedBeforeRegistration || this.#closed) throw new Error("Gateway connection closed");
 
       connectionId = this.#newConnectionId();
@@ -279,6 +288,7 @@ export class PanelSessionBroker {
     if (!session) return;
     this.#sessions.delete(connectionId);
     if (session.idleTimer) clearTimeout(session.idleTimer);
+    void this.#stopClient(session.client);
   }
 
   async #stopClient(client: GatewayClientLike): Promise<void> {

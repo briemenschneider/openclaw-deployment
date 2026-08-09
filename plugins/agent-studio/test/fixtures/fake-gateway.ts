@@ -15,6 +15,7 @@ export type FakeGateway = {
   connectAttempts: Array<{ token: string | undefined; scopes: string[] | undefined }>;
   httpRequests: CapturedHttpRequest[];
   activeConnectionCount(): number;
+  disconnectGatewayClients(): void;
   stop(): Promise<void>;
 };
 
@@ -244,6 +245,9 @@ export async function startFakeGateway(): Promise<FakeGateway> {
     connectAttempts,
     httpRequests,
     activeConnectionCount: () => activeSockets.size,
+    disconnectGatewayClients() {
+      for (const socket of activeSockets) socket.terminate();
+    },
     async browserPost(pathname, init) {
       if (!browserExecutable) throw new Error("Chrome or Edge executable is required for transport spike");
       const search = new URLSearchParams({
