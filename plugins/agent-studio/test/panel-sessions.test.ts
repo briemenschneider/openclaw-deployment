@@ -76,7 +76,6 @@ describe("panel session broker", () => {
       connectionId: expect.stringMatching(/^[0-9a-f]{64}$/),
       features: {
         listAgents: false,
-        getAgent: false,
         updateAgent: false,
         listAgentFiles: false,
         getAgentFile: false,

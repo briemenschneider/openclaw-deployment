@@ -5,7 +5,6 @@ export type GatewayOperationClient = Pick<GatewayClient, "request">;
 
 export const BROWSER_OPERATIONS = [
   "listAgents",
-  "getAgent",
   "updateAgent",
   "listAgentFiles",
   "getAgentFile",
@@ -37,7 +36,6 @@ export type GatewayOperationResult =
 
 const OPERATION_METHODS: Readonly<Record<BrowserOperation, string>> = {
   listAgents: "agents.list",
-  getAgent: "agent.get",
   updateAgent: "agents.update",
   listAgentFiles: "agents.files.list",
   getAgentFile: "agents.files.get",
@@ -58,7 +56,6 @@ const CORE_AGENT_FILES = new Set([
   "MEMORY.md",
 ]);
 
-const REDACTED_RESPONSE_KEY = /^(?:accessToken|agentRuntimeIdentityToken|apiKey|approvalRuntimeToken|authorization|authToken|bootstrapToken|cause|cookie|credential|credentials|details|deviceToken|password|privateKey|refreshToken|secret|stack|token)$/i;
 const AGENT_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 function operationError(
@@ -129,7 +126,6 @@ function validatePayload(operation: BrowserOperation, payload: unknown): Record<
   switch (operation) {
     case "listAgents":
       return hasExactlyKeys(payload, []) ? {} : undefined;
-    case "getAgent":
     case "listAgentFiles":
       return hasExactlyKeys(payload, ["agentId"]) && isAgentId(payload.agentId)
         ? { agentId: payload.agentId }
@@ -242,7 +238,6 @@ function validatePayload(operation: BrowserOperation, payload: unknown): Record<
 function browserOperation(value: string): BrowserOperation | undefined {
   switch (value) {
     case "listAgents":
-    case "getAgent":
     case "updateAgent":
     case "listAgentFiles":
     case "getAgentFile":
@@ -256,21 +251,229 @@ function browserOperation(value: string): BrowserOperation | undefined {
   }
 }
 
-function sanitizedGatewayData(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map((entry) => sanitizedGatewayData(entry));
-  if (!isRecord(value)) return value;
-  const sanitized: Record<string, unknown> = {};
-  for (const [key, entry] of Object.entries(value)) {
-    if (!REDACTED_RESPONSE_KEY.test(key)) sanitized[key] = sanitizedGatewayData(entry);
+function copyString(
+  source: Record<string, unknown>,
+  target: Record<string, unknown>,
+  key: string,
+): void {
+  if (typeof source[key] === "string") target[key] = source[key];
+}
+
+function copyBoolean(
+  source: Record<string, unknown>,
+  target: Record<string, unknown>,
+  key: string,
+): void {
+  if (typeof source[key] === "boolean") target[key] = source[key];
+}
+
+function copyNumber(
+  source: Record<string, unknown>,
+  target: Record<string, unknown>,
+  key: string,
+): void {
+  if (typeof source[key] === "number" && Number.isFinite(source[key])) {
+    target[key] = source[key];
   }
-  return sanitized;
+}
+
+function copyNullableNumber(
+  source: Record<string, unknown>,
+  target: Record<string, unknown>,
+  key: string,
+): void {
+  if (source[key] === null) target[key] = null;
+  else copyNumber(source, target, key);
+}
+
+function copyStringArray(
+  source: Record<string, unknown>,
+  target: Record<string, unknown>,
+  key: string,
+): void {
+  const value = source[key];
+  if (Array.isArray(value)) target[key] = value.filter((entry): entry is string => typeof entry === "string");
+}
+
+function projectAgentIdentity(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value)) return undefined;
+  const result: Record<string, unknown> = {};
+  for (const key of ["name", "theme", "emoji", "avatar", "avatarUrl"]) copyString(value, result, key);
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function projectAgentModel(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value)) return undefined;
+  const result: Record<string, unknown> = {};
+  copyString(value, result, "primary");
+  copyStringArray(value, result, "fallbacks");
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function projectAgent(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value) || typeof value.id !== "string") return undefined;
+  const result: Record<string, unknown> = { id: value.id };
+  copyString(value, result, "name");
+  copyBoolean(value, result, "workspaceGit");
+  const identity = projectAgentIdentity(value.identity);
+  if (identity) result.identity = identity;
+  const model = projectAgentModel(value.model);
+  if (model) result.model = model;
+  return result;
+}
+
+function projectAgentsList(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) return {};
+  const result: Record<string, unknown> = {};
+  copyString(value, result, "defaultId");
+  if (Array.isArray(value.agents)) {
+    result.agents = value.agents.map(projectAgent).filter((entry) => entry !== undefined);
+  }
+  return result;
+}
+
+function projectAgentUpdate(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) return {};
+  const result: Record<string, unknown> = {};
+  copyBoolean(value, result, "ok");
+  copyString(value, result, "agentId");
+  return result;
+}
+
+function projectAgentFile(value: unknown, includeContent: boolean): Record<string, unknown> | undefined {
+  if (!isRecord(value) || typeof value.name !== "string") return undefined;
+  const result: Record<string, unknown> = { name: value.name };
+  copyBoolean(value, result, "missing");
+  copyNumber(value, result, "size");
+  copyNumber(value, result, "updatedAtMs");
+  if (includeContent) copyString(value, result, "content");
+  return result;
+}
+
+function projectAgentFilesList(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) return {};
+  const result: Record<string, unknown> = {};
+  copyString(value, result, "agentId");
+  if (Array.isArray(value.files)) {
+    result.files = value.files
+      .map((entry) => projectAgentFile(entry, false))
+      .filter((entry) => entry !== undefined);
+  }
+  return result;
+}
+
+function projectAgentFileResult(value: unknown, includeOk: boolean): Record<string, unknown> {
+  if (!isRecord(value)) return {};
+  const result: Record<string, unknown> = {};
+  if (includeOk) copyBoolean(value, result, "ok");
+  copyString(value, result, "agentId");
+  const file = projectAgentFile(value.file, true);
+  if (file) result.file = file;
+  return result;
+}
+
+function projectModel(value: unknown): Record<string, unknown> | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    typeof value.name !== "string" ||
+    typeof value.provider !== "string"
+  ) {
+    return undefined;
+  }
+  const result: Record<string, unknown> = {
+    id: value.id,
+    name: value.name,
+    provider: value.provider,
+  };
+  copyString(value, result, "alias");
+  copyBoolean(value, result, "available");
+  copyNumber(value, result, "contextWindow");
+  copyBoolean(value, result, "reasoning");
+  return result;
+}
+
+function projectModelsList(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) return {};
+  const result: Record<string, unknown> = {};
+  if (Array.isArray(value.models)) {
+    result.models = value.models.map(projectModel).filter((entry) => entry !== undefined);
+  }
+  return result;
+}
+
+function projectSession(value: unknown): Record<string, unknown> | undefined {
+  if (!isRecord(value) || typeof value.key !== "string") return undefined;
+  const result: Record<string, unknown> = { key: value.key };
+  for (const key of [
+    "agentId",
+    "sessionId",
+    "kind",
+    "label",
+    "displayName",
+    "status",
+    "modelProvider",
+    "model",
+  ]) {
+    copyString(value, result, key);
+  }
+  for (const key of ["archived", "pinned", "unread", "hasActiveRun"]) {
+    copyBoolean(value, result, key);
+  }
+  for (const key of ["updatedAt", "startedAt", "endedAt", "totalTokens"]) {
+    copyNumber(value, result, key);
+  }
+  return result;
+}
+
+function projectSessionsList(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) return {};
+  const result: Record<string, unknown> = {};
+  for (const key of ["count", "totalCount", "limitApplied", "offset"]) copyNumber(value, result, key);
+  copyNullableNumber(value, result, "nextOffset");
+  copyBoolean(value, result, "hasMore");
+  if (Array.isArray(value.sessions)) {
+    result.sessions = value.sessions.map(projectSession).filter((entry) => entry !== undefined);
+  }
+  return result;
+}
+
+function projectSessionCreate(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) return {};
+  const result: Record<string, unknown> = {};
+  copyBoolean(value, result, "ok");
+  copyString(value, result, "key");
+  copyString(value, result, "sessionId");
+  copyBoolean(value, result, "runStarted");
+  copyString(value, result, "status");
+  return result;
+}
+
+function projectGatewayData(operation: BrowserOperation, value: unknown): Record<string, unknown> {
+  switch (operation) {
+    case "listAgents":
+      return projectAgentsList(value);
+    case "updateAgent":
+      return projectAgentUpdate(value);
+    case "listAgentFiles":
+      return projectAgentFilesList(value);
+    case "getAgentFile":
+      return projectAgentFileResult(value, false);
+    case "setAgentFile":
+      return projectAgentFileResult(value, true);
+    case "listModels":
+      return projectModelsList(value);
+    case "listSessions":
+      return projectSessionsList(value);
+    case "createSession":
+      return projectSessionCreate(value);
+  }
 }
 
 export function deriveGatewayOperationFeatures(methods: readonly string[]): GatewayOperationFeatures {
   const advertised = new Set(methods);
   return {
     listAgents: advertised.has(OPERATION_METHODS.listAgents),
-    getAgent: advertised.has(OPERATION_METHODS.getAgent),
     updateAgent: advertised.has(OPERATION_METHODS.updateAgent),
     listAgentFiles: advertised.has(OPERATION_METHODS.listAgentFiles),
     getAgentFile: advertised.has(OPERATION_METHODS.getAgentFile),
@@ -297,7 +500,7 @@ export async function executeGatewayOperation(
 
   try {
     const data = await client.request(method, validatedPayload);
-    return { ok: true, data: sanitizedGatewayData(data) };
+    return { ok: true, data: projectGatewayData(operation, data) };
   } catch {
     return operationError("GATEWAY_REQUEST_FAILED", "Gateway request failed");
   }

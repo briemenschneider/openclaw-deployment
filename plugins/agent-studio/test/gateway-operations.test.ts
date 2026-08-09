@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 import {
+  BROWSER_OPERATIONS,
   createPanelRequestBroker,
   deriveGatewayOperationFeatures,
   executeGatewayOperation,
@@ -31,7 +32,6 @@ function recordingClient(result: unknown = { accepted: true }) {
 
 const advertised = [
   "agents.list",
-  "agent.get",
   "agents.update",
   "agents.files.list",
   "agents.files.get",
@@ -53,7 +53,6 @@ describe("Gateway operation allowlist", () => {
       ]),
     ).toEqual({
       listAgents: true,
-      getAgent: false,
       updateAgent: false,
       listAgentFiles: false,
       getAgentFile: true,
@@ -66,7 +65,6 @@ describe("Gateway operation allowlist", () => {
 
   it.each([
     ["listAgents", {}, "agents.list", {}],
-    ["getAgent", { agentId: "main" }, "agent.get", { agentId: "main" }],
     [
       "updateAgent",
       { agentId: "main", name: "Main", model: "openai/gpt-5.6" },
@@ -116,11 +114,45 @@ describe("Gateway operation allowlist", () => {
   ] as const)("maps %s independently to the approved Gateway method", async (operation, payload, method, expected) => {
     const { calls, client } = recordingClient();
 
-    await expect(executeGatewayOperation(client, advertised, operation, payload)).resolves.toEqual({
+    await expect(executeGatewayOperation(client, advertised, operation, payload)).resolves.toMatchObject({
       ok: true,
-      data: { accepted: true },
     });
     expect(calls).toEqual([{ method, payload: expected }]);
+  });
+
+  it("has no browser detail RPC even when nonexistent detail method names are advertised", async () => {
+    const inventedMethods = ["agent.get", "agents.get", "agent.identity.get"];
+    const features = deriveGatewayOperationFeatures(["agents.list", ...inventedMethods]);
+    const { calls, client } = recordingClient();
+
+    expect(BROWSER_OPERATIONS).toEqual([
+      "listAgents",
+      "updateAgent",
+      "listAgentFiles",
+      "getAgentFile",
+      "setAgentFile",
+      "listModels",
+      "listSessions",
+      "createSession",
+    ]);
+    expect(features).toEqual({
+      listAgents: true,
+      updateAgent: false,
+      listAgentFiles: false,
+      getAgentFile: false,
+      setAgentFile: false,
+      listModels: false,
+      listSessions: false,
+      createSession: false,
+    });
+
+    await expect(
+      executeGatewayOperation(client, inventedMethods, "getAgent", { agentId: "main" }),
+    ).resolves.toEqual({
+      ok: false,
+      error: { code: "UNSUPPORTED_OPERATION", message: "Unsupported operation" },
+    });
+    expect(calls).toEqual([]);
   });
 
   it("rejects a valid browser operation when its Gateway method was not advertised", async () => {
@@ -135,6 +167,9 @@ describe("Gateway operation allowlist", () => {
 
   it.each([
     ["agents.list", {}],
+    ["agent.get", { agentId: "main" }],
+    ["agents.get", { agentId: "main" }],
+    ["agent.identity.get", { agentId: "main" }],
     ["config.set", { path: "gateway.auth.token", value: "stolen" }],
     ["exec.run", { command: "whoami" }],
     ["node.invoke", { command: "system.run" }],
@@ -153,8 +188,6 @@ describe("Gateway operation allowlist", () => {
 
   it.each([
     ["listAgents", { extra: true }],
-    ["getAgent", { agentId: "" }],
-    ["getAgent", { agentId: "main", extra: true }],
     ["updateAgent", { agentId: "main" }],
     ["updateAgent", { agentId: "main", name: 42 }],
     ["updateAgent", { agentId: "main", name: "x".repeat(129) }],
@@ -184,28 +217,349 @@ describe("Gateway operation allowlist", () => {
     expect(calls).toEqual([]);
   });
 
-  it("redacts credential and server-internal fields from successful Gateway responses", async () => {
-    const { client } = recordingClient({
-      agents: [{ id: "main", name: "Main", token: "gateway-secret" }],
-      password: "server-password",
-      nested: {
-        authorization: "Bearer private",
-        visible: true,
-        totalTokens: 42,
-        stack: "internal stack",
+  it.each([
+    {
+      operation: "listAgents",
+      payload: {},
+      gateway: {
+        defaultId: "main",
+        mainKey: "agent:main:main",
+        scope: "global",
+        workspace: "C:\\secret\\agents",
+        path: "C:\\secret\\agents.json",
+        filePath: "C:\\secret\\config.json",
+        entry: { token: "entry-secret" },
+        worktree: { path: "C:\\secret\\tree" },
+        token: "gateway-secret",
+        unknown: "drop-me",
+        nested: { secret: "nested-secret" },
+        agents: [
+          {
+            id: "main",
+            name: "Main",
+            workspace: "C:\\secret\\main",
+            workspaceGit: true,
+            identity: {
+              name: "Main Agent",
+              theme: "dark",
+              emoji: "🦀",
+              avatar: "avatar.png",
+              avatarUrl: "https://example.test/avatar.png",
+              token: "identity-secret",
+              unknown: true,
+            },
+            model: {
+              primary: "openai/gpt-5.6",
+              fallbacks: ["anthropic/claude-sonnet-4-6"],
+              token: "model-secret",
+            },
+            token: "agent-secret",
+            unknown: true,
+          },
+        ],
       },
-    });
-
-    const result = await executeGatewayOperation(client, advertised, "listAgents", {});
-
-    expect(result).toEqual({
-      ok: true,
-      data: {
-        agents: [{ id: "main", name: "Main" }],
-        nested: { visible: true, totalTokens: 42 },
+      expected: {
+        defaultId: "main",
+        agents: [
+          {
+            id: "main",
+            name: "Main",
+            workspaceGit: true,
+            identity: {
+              name: "Main Agent",
+              theme: "dark",
+              emoji: "🦀",
+              avatar: "avatar.png",
+              avatarUrl: "https://example.test/avatar.png",
+            },
+            model: {
+              primary: "openai/gpt-5.6",
+              fallbacks: ["anthropic/claude-sonnet-4-6"],
+            },
+          },
+        ],
       },
-    });
-    expect(JSON.stringify(result)).not.toMatch(/gateway-secret|server-password|Bearer private|internal stack/);
+    },
+    {
+      operation: "updateAgent",
+      payload: { agentId: "main", name: "Main" },
+      gateway: {
+        ok: true,
+        agentId: "main",
+        workspace: "C:\\secret\\main",
+        path: "C:\\secret\\agents.json",
+        filePath: "C:\\secret\\config.json",
+        entry: { token: "entry-secret" },
+        worktree: { path: "C:\\secret\\tree" },
+        token: "gateway-secret",
+        unknown: true,
+        nested: { secret: "nested-secret" },
+      },
+      expected: { ok: true, agentId: "main" },
+    },
+    {
+      operation: "listAgentFiles",
+      payload: { agentId: "main" },
+      gateway: {
+        agentId: "main",
+        workspace: "C:\\secret\\main",
+        path: "C:\\secret\\root",
+        filePath: "C:\\secret\\index.json",
+        entry: { token: "entry-secret" },
+        worktree: { path: "C:\\secret\\tree" },
+        token: "gateway-secret",
+        unknown: true,
+        nested: { secret: "nested-secret" },
+        files: [
+          {
+            name: "SOUL.md",
+            path: "C:\\secret\\main\\SOUL.md",
+            filePath: "C:\\secret\\main\\SOUL.md",
+            missing: false,
+            size: 12,
+            updatedAtMs: 123,
+            content: "not needed in list",
+            token: "file-secret",
+            unknown: true,
+          },
+        ],
+      },
+      expected: {
+        agentId: "main",
+        files: [{ name: "SOUL.md", missing: false, size: 12, updatedAtMs: 123 }],
+      },
+    },
+    {
+      operation: "getAgentFile",
+      payload: { agentId: "main", name: "SOUL.md" },
+      gateway: {
+        agentId: "main",
+        workspace: "C:\\secret\\main",
+        path: "C:\\secret\\root",
+        filePath: "C:\\secret\\index.json",
+        entry: { token: "entry-secret" },
+        worktree: { path: "C:\\secret\\tree" },
+        token: "gateway-secret",
+        unknown: true,
+        nested: { secret: "nested-secret" },
+        file: {
+          name: "SOUL.md",
+          path: "C:\\secret\\main\\SOUL.md",
+          filePath: "C:\\secret\\main\\SOUL.md",
+          missing: false,
+          size: 12,
+          updatedAtMs: 123,
+          content: "Be helpful.",
+          token: "file-secret",
+          unknown: true,
+        },
+      },
+      expected: {
+        agentId: "main",
+        file: {
+          name: "SOUL.md",
+          missing: false,
+          size: 12,
+          updatedAtMs: 123,
+          content: "Be helpful.",
+        },
+      },
+    },
+    {
+      operation: "setAgentFile",
+      payload: { agentId: "main", name: "SOUL.md", content: "Be helpful." },
+      gateway: {
+        ok: true,
+        agentId: "main",
+        workspace: "C:\\secret\\main",
+        path: "C:\\secret\\root",
+        filePath: "C:\\secret\\index.json",
+        entry: { token: "entry-secret" },
+        worktree: { path: "C:\\secret\\tree" },
+        token: "gateway-secret",
+        unknown: true,
+        nested: { secret: "nested-secret" },
+        file: {
+          name: "SOUL.md",
+          path: "C:\\secret\\main\\SOUL.md",
+          filePath: "C:\\secret\\main\\SOUL.md",
+          missing: false,
+          size: 12,
+          updatedAtMs: 123,
+          content: "Be helpful.",
+          token: "file-secret",
+          unknown: true,
+        },
+      },
+      expected: {
+        ok: true,
+        agentId: "main",
+        file: {
+          name: "SOUL.md",
+          missing: false,
+          size: 12,
+          updatedAtMs: 123,
+          content: "Be helpful.",
+        },
+      },
+    },
+    {
+      operation: "listModels",
+      payload: { view: "configured" },
+      gateway: {
+        workspace: "C:\\secret\\models",
+        path: "C:\\secret\\models.json",
+        filePath: "C:\\secret\\provider.json",
+        entry: { token: "entry-secret" },
+        worktree: { path: "C:\\secret\\tree" },
+        token: "gateway-secret",
+        unknown: true,
+        nested: { secret: "nested-secret" },
+        models: [
+          {
+            id: "openai/gpt-5.6",
+            name: "GPT-5.6",
+            provider: "openai",
+            alias: "gpt",
+            available: true,
+            contextWindow: 200_000,
+            reasoning: true,
+            token: "model-secret",
+            unknown: true,
+          },
+        ],
+      },
+      expected: {
+        models: [
+          {
+            id: "openai/gpt-5.6",
+            name: "GPT-5.6",
+            provider: "openai",
+            alias: "gpt",
+            available: true,
+            contextWindow: 200_000,
+            reasoning: true,
+          },
+        ],
+      },
+    },
+    {
+      operation: "listSessions",
+      payload: { agentId: "main", limit: 25 },
+      gateway: {
+        ts: 999,
+        path: "C:\\secret\\sessions.json",
+        workspace: "C:\\secret\\main",
+        filePath: "C:\\secret\\session.json",
+        entry: { token: "entry-secret" },
+        worktree: { path: "C:\\secret\\tree" },
+        token: "gateway-secret",
+        unknown: true,
+        nested: { secret: "nested-secret" },
+        count: 1,
+        totalCount: 3,
+        limitApplied: 25,
+        offset: 0,
+        nextOffset: 1,
+        hasMore: true,
+        defaults: { token: "defaults-secret" },
+        sessions: [
+          {
+            agentId: "main",
+            key: "agent:main:review",
+            sessionId: "session-1",
+            kind: "direct",
+            label: "Review",
+            displayName: "Review",
+            updatedAt: 123,
+            archived: false,
+            pinned: true,
+            unread: false,
+            status: "ok",
+            hasActiveRun: false,
+            startedAt: 100,
+            endedAt: 120,
+            modelProvider: "openai",
+            model: "gpt-5.6",
+            totalTokens: 42,
+            workspace: "C:\\secret\\session",
+            path: "C:\\secret\\transcript.jsonl",
+            filePath: "C:\\secret\\transcript.jsonl",
+            entry: { token: "row-entry-secret" },
+            worktree: { path: "C:\\secret\\tree" },
+            token: "row-secret",
+            unknown: true,
+            nested: { secret: "row-nested-secret" },
+            deliveryContext: { token: "delivery-secret" },
+            activeRunIds: ["private-run-id"],
+          },
+        ],
+      },
+      expected: {
+        count: 1,
+        totalCount: 3,
+        limitApplied: 25,
+        offset: 0,
+        nextOffset: 1,
+        hasMore: true,
+        sessions: [
+          {
+            agentId: "main",
+            key: "agent:main:review",
+            sessionId: "session-1",
+            kind: "direct",
+            label: "Review",
+            displayName: "Review",
+            updatedAt: 123,
+            archived: false,
+            pinned: true,
+            unread: false,
+            status: "ok",
+            hasActiveRun: false,
+            startedAt: 100,
+            endedAt: 120,
+            modelProvider: "openai",
+            model: "gpt-5.6",
+            totalTokens: 42,
+          },
+        ],
+      },
+    },
+    {
+      operation: "createSession",
+      payload: { agentId: "main", worktree: true },
+      gateway: {
+        ok: true,
+        key: "agent:main:new",
+        sessionId: "session-new",
+        runStarted: true,
+        status: "started",
+        workspace: "C:\\secret\\session",
+        path: "C:\\secret\\transcript.jsonl",
+        filePath: "C:\\secret\\transcript.jsonl",
+        entry: { token: "entry-secret", message: "private prompt" },
+        worktree: { id: "tree-1", path: "C:\\secret\\tree", branch: "private" },
+        token: "gateway-secret",
+        unknown: true,
+        nested: { secret: "nested-secret" },
+      },
+      expected: {
+        ok: true,
+        key: "agent:main:new",
+        sessionId: "session-new",
+        runStarted: true,
+        status: "started",
+      },
+    },
+  ] as const)("positively projects the closed $operation success response", async ({ operation, payload, gateway, expected }) => {
+    const { client } = recordingClient(gateway);
+
+    const result = await executeGatewayOperation(client, advertised, operation, payload);
+
+    expect(result).toEqual({ ok: true, data: expected });
+    expect(JSON.stringify(result)).not.toMatch(
+      /C:\\\\secret|entry-secret|gateway-secret|nested-secret|private prompt|private-run-id/,
+    );
   });
 
   it("normalizes Gateway failures without credentials, details, causes, or server messages", async () => {
