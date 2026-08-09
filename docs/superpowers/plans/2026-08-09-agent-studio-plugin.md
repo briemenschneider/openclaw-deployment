@@ -45,6 +45,31 @@ an explicit agent/session RPC allowlist. Colors live in atomic plugin-owned stat
 | `deploy-agent-studio.ps1` | Build, pack, copy, install, enable, and inspect in the container |
 | `docs/agent-studio.md` | Operator setup, token behavior, usage, update, rollback |
 
+## Task 0: Scaffold the test harness
+
+**Files:**
+
+- Create: `plugins/agent-studio/package.json`
+- Create: `plugins/agent-studio/tsconfig.json`
+- Create: `plugins/agent-studio/vite.config.ts`
+
+- [ ] Create only the package and test/build configuration needed to run Task 1; do not create
+  any plugin runtime or UI production code.
+- [ ] Pin peer compatibility to OpenClaw 2026.7.x and configure strict TypeScript, Vitest, and the
+  future Vite panel build.
+- [ ] Install the locked dependencies and verify Vitest starts successfully with no test files.
+- [ ] Commit the generated lockfile with the scaffold.
+
+Run:
+
+```powershell
+npm --prefix plugins/agent-studio install
+npm --prefix plugins/agent-studio test -- --run
+```
+
+Expected: Vitest starts successfully and exits because no test files exist. Task 1 supplies the
+first failing behavioral test before any production module is written.
+
 ## Task 1: Prove the pure-plugin transport
 
 **Files:**
@@ -136,7 +161,8 @@ npm --prefix plugins/agent-studio test -- http-handler
 **Files:** `src/gateway-operations.ts`, `test/gateway-operations.test.ts`.
 
 - [ ] Define browser operation names independent of Gateway method strings.
-- [ ] Map only agent listing/details, agent file list/get/set, model list, and session creation.
+- [ ] Map only agent listing/details, agent file list/get/set, model list, session listing, and
+  session creation.
 - [ ] Validate every operation payload before calling `client.request`.
 - [ ] Normalize Gateway errors into stable UI error codes without leaking credentials or server
   internals.
@@ -291,4 +317,3 @@ Release is blocked if any of these are true:
 - the parent dashboard is patched or manipulated;
 - persona save can silently overwrite a concurrent change;
 - a session is created for a different agent than the visible selection.
-

@@ -177,6 +177,7 @@ The first implementation may dispatch only:
 - `agents.get`/`agents.update` where advertised by the pinned Gateway;
 - `agents.files.list`, `agents.files.get`, `agents.files.set`;
 - `models.list`;
+- `sessions.list`;
 - `sessions.create`.
 
 Startup and integration tests compare this list with the Gateway's advertised method set and
@@ -247,4 +248,3 @@ changes.
 - Persisting the Gateway token or deriving it from OpenClaw config.
 - Exposing a generic HTTP-to-Gateway RPC proxy.
 - Publishing to npm or ClawHub during the initial local deployment.
-
