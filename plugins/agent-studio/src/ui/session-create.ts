@@ -184,10 +184,22 @@ export class SessionCreate extends LitElement {
 
   protected willUpdate(changed: Map<string, unknown>): void {
     if (changed.has("state") && this.state.status === "created") this.localAdvanced = false;
+    // Close the dialog when the operator moves to another agent. The fields are
+    // uncontrolled, so closing is what discards text written for the previous
+    // agent - otherwise an initial task meant for one agent is submitted to another.
+    if (changed.has("agentId") && changed.get("agentId") !== this.agentId) {
+      this.localAdvanced = false;
+      this.copied = false;
+    }
   }
 
   private get advancedOpen(): boolean {
-    return this.localAdvanced || this.state.advancedOpen;
+    return (this.localAdvanced || this.state.advancedOpen) && !this.belongsToAnotherAgent();
+  }
+
+  /** True when `state` describes an agent other than the one now on screen. */
+  private belongsToAnotherAgent(): boolean {
+    return this.state.agentId !== undefined && this.state.agentId !== this.agentId;
   }
 
   protected render(): TemplateResult {
@@ -201,7 +213,7 @@ export class SessionCreate extends LitElement {
       `;
     }
 
-    const busy = this.state.status === "creating";
+    const busy = this.state.status === "creating" && !this.belongsToAnotherAgent();
     return html`
       <section class="session-create" aria-label="Sessions">
         <div class="session-actions">
@@ -222,11 +234,13 @@ export class SessionCreate extends LitElement {
             Advanced
           </button>
         </div>
-        ${this.state.errorText
+        ${this.state.errorText && !this.belongsToAnotherAgent()
           ? html`<p class="session-error" role="alert">${this.state.errorText}</p>`
           : nothing}
         ${this.advancedOpen ? this.renderDialog(busy) : nothing}
-        ${this.state.status === "created" && this.state.key ? this.renderResult(this.state.key) : nothing}
+        ${this.state.status === "created" && this.state.key && !this.belongsToAnotherAgent()
+          ? this.renderResult(this.state.key)
+          : nothing}
       </section>
     `;
   }

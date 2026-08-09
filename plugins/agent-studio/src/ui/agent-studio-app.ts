@@ -133,7 +133,7 @@ export class AgentStudioApp extends LitElement {
                     id="gateway-token"
                     name="gateway-token"
                     type="password"
-                    autocomplete="current-password"
+                    autocomplete="off"
                     spellcheck="false"
                     ?disabled=${this.connecting}
                     @keydown=${this.handleTokenKeydown}
@@ -295,6 +295,7 @@ export class AgentStudioApp extends LitElement {
           ? html`<agent-overview
               .agent=${agent}
               .features=${this.features}
+              .saving=${this.directoryState?.updatingAgentId === agent?.id}
               .errorText=${this.directoryState?.updateErrorText}
               @agent-update=${this.handleAgentUpdate}
             ></agent-overview>`

@@ -122,7 +122,9 @@ Write-Host 'checking the package contents...'
 # steps have to run from inside the plugin.
 Push-Location $pluginRoot
 try {
-    $dryRun = & npm pack --dry-run --json 2>&1
+    # No 2>&1: npm writes update notices and EBADENGINE warnings to stderr, and
+    # folding them into stdout turns ConvertFrom-Json into an opaque parse error.
+    $dryRun = & npm pack --dry-run --json
     if ($LASTEXITCODE -ne 0) { throw "npm pack --dry-run failed with exit code $LASTEXITCODE" }
 }
 finally { Pop-Location }
@@ -143,8 +145,13 @@ if ($files | Where-Object { $_ -like 'src/*' -or $_ -like 'test/*' }) {
 Write-Host 'packing...'
 Push-Location $pluginRoot
 try {
-    $tarballName = (& npm pack --silent 2>&1 | Out-String).Trim() -split "`n" | Select-Object -Last 1
+    # Same reason as the dry run: stderr must not be parsed as the tarball name.
+    $tarballName = (& npm pack --silent | Out-String).Trim() -split "`n" |
+        Where-Object { $_ -like '*.tgz' } |
+        Select-Object -Last 1
     if ($LASTEXITCODE -ne 0) { throw "npm pack failed with exit code $LASTEXITCODE" }
+    if (-not $tarballName) { throw 'npm pack did not report a tarball name' }
+    $tarballName = $tarballName.Trim()
 }
 finally { Pop-Location }
 

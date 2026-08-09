@@ -118,6 +118,33 @@ describe("agent overview", () => {
     expect(query<HTMLElement>(overview, '[data-fact="name"]').textContent).toContain("Atlas");
   });
 
+  it("does not offer a save that would send nothing", async () => {
+    const overview = await renderOverview();
+    const updates: unknown[] = [];
+    overview.addEventListener("agent-update", (event) => updates.push(event));
+
+    // agents.update cannot clear a model override, so an emptied field is not a change.
+    const model = query<HTMLInputElement>(overview, "#overview-model");
+    model.value = "";
+    model.dispatchEvent(new Event("input", { bubbles: true }));
+    await overview.updateComplete;
+
+    expect(query<HTMLButtonElement>(overview, ".overview-save").disabled).toBe(true);
+    query<HTMLButtonElement>(overview, ".overview-save").click();
+    expect(updates).toHaveLength(0);
+  });
+
+  it("blocks a second submission while one is in flight", async () => {
+    const overview = await renderOverview({ saving: true });
+    const name = query<HTMLInputElement>(overview, "#overview-name");
+    name.value = "Atlas Prime";
+    name.dispatchEvent(new Event("input", { bubbles: true }));
+    await overview.updateComplete;
+
+    expect(query<HTMLButtonElement>(overview, ".overview-save").disabled).toBe(true);
+    expect(query<HTMLButtonElement>(overview, ".overview-save").textContent).toContain("Saving");
+  });
+
   it("surfaces a save failure without leaking server text", async () => {
     const overview = await renderOverview({ errorText: "Could not update this agent." });
 

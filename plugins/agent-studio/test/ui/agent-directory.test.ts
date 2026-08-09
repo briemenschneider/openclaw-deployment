@@ -250,6 +250,40 @@ describe("agent directory store", () => {
     expect(store.getState().agents.find((agent) => agent.id === "zephyr")?.color).toBe("#abcdef");
   });
 
+  it("does not let a stale color failure revert a newer success", async () => {
+    let failFirst!: () => void;
+    let firstCall = true;
+    const store = createAgentDirectoryStore({
+      api: stubApi({
+        ...defaultHandlers(),
+        "colors.set": async (payload) => {
+          if (firstCall) {
+            firstCall = false;
+            await new Promise<void>((resolve) => {
+              failFirst = resolve;
+            });
+            throw new Error("slow failure");
+          }
+          return { agentId: payload.agentId, color: payload.color };
+        },
+      }),
+      connectionId,
+      features,
+    });
+    await store.load();
+
+    const first = store.setColor("atlas", "#e2664f");
+    await store.setColor("atlas", "#4f9ed8");
+    expect(store.getState().agents.find((agent) => agent.id === "atlas")?.color).toBe("#4f9ed8");
+
+    failFirst();
+    await first;
+
+    // The failed request is older than the stored colour, so it must not revert it.
+    expect(store.getState().agents.find((agent) => agent.id === "atlas")?.color).toBe("#4f9ed8");
+    expect(store.getState().colorErrorText).toBeUndefined();
+  });
+
   it("rejects invalid colors before contacting the broker", async () => {
     const calls: OperationCall[] = [];
     const store = createAgentDirectoryStore({

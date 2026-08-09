@@ -80,10 +80,35 @@ export class AgentOverview extends LitElement {
     `;
   }
 
+  private nameDraft(agent: DirectoryAgent): string {
+    return (this.draftName ?? agent.label).trim();
+  }
+
+  private modelDraft(agent: DirectoryAgent): string {
+    return (this.draftModel ?? agent.model ?? "").trim();
+  }
+
+  /**
+   * The fields this submission would actually send. `agents.update` has no way to
+   * clear a model override, so an emptied model field is not a change.
+   */
+  private changes(agent: DirectoryAgent): Record<string, unknown> {
+    const name = this.nameDraft(agent);
+    const model = this.modelDraft(agent);
+    const detail: Record<string, unknown> = { agentId: agent.id };
+    if (name && name !== agent.label) detail.name = name;
+    if (model && model !== (agent.model ?? "")) detail.model = model;
+    return detail;
+  }
+
   private renderEditor(agent: DirectoryAgent): TemplateResult {
     const name = this.draftName ?? agent.label;
     const model = this.draftModel ?? agent.model ?? "";
-    const dirty = name !== agent.label || model !== (agent.model ?? "");
+    // An emptied name still counts as edited so that Save can report why it is
+    // invalid; an emptied model does not, because clearing it cannot be sent.
+    const dirty =
+      this.nameDraft(agent) !== agent.label ||
+      (this.modelDraft(agent) !== "" && this.modelDraft(agent) !== (agent.model ?? ""));
     return html`
       <div class="overview-editor">
         <label for="overview-name">Display name</label>
@@ -135,16 +160,12 @@ export class AgentOverview extends LitElement {
   }
 
   private submit(agent: DirectoryAgent): void {
-    const name = (this.draftName ?? agent.label).trim();
-    const model = (this.draftModel ?? agent.model ?? "").trim();
-    if (!name) {
+    if (!this.nameDraft(agent)) {
       this.localError = "Name cannot be empty.";
       return;
     }
 
-    const detail: Record<string, unknown> = { agentId: agent.id };
-    if (name !== agent.label) detail.name = name;
-    if (model && model !== (agent.model ?? "")) detail.model = model;
+    const detail = this.changes(agent);
     if (Object.keys(detail).length < 2) return;
 
     this.localError = "";

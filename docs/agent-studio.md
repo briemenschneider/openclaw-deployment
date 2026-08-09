@@ -117,7 +117,11 @@ clears plugin state.
 
 | Date | OpenClaw version / digest | Package SHA-256 |
 | --- | --- | --- |
-| 2026-08-09 | `2026.7.1` — `sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c` | `2a503a23d3fde5b5d63c5abad536678ba9b51ffdb9fed260ce8252f5384e669a` |
+| 2026-08-09 | `2026.7.1` — `sha256:6a31d44b2944e7adcd2b582bf6fb463111264ebca97a0201795b799135bd102c` | `a5f6b7e925c760d016fde0575f8f1152ede82ecbe8fcd1811cf9d5c4c44f15cf` |
+
+> Supersedes `2a503a23…`, which shipped a defect where a persona save issued while
+> the operator switched agents could write one agent's draft into another agent's
+> file. Do not run that build.
 
 What that build was verified to do, against the live container:
 

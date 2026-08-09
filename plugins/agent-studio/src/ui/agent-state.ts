@@ -73,6 +73,8 @@ export type AgentDirectoryState = {
   errorText?: string;
   colorErrorText?: string;
   updateErrorText?: string;
+  /** Set while an agents.update for this agent is in flight. */
+  updatingAgentId?: string;
 };
 
 export type AgentDirectoryStore = {
@@ -172,6 +174,16 @@ export function createAgentDirectoryStore(options: AgentDirectoryStoreOptions): 
   let errorText: string | undefined;
   let colorErrorText: string | undefined;
   let updateErrorText: string | undefined;
+  let updatingAgentId: string | undefined;
+  /** Newest in-flight mutation per agent, so a stale failure cannot revert a newer success. */
+  const colorMutations = new Map<string, number>();
+  const agentMutations = new Map<string, number>();
+
+  function claimMutation(mutations: Map<string, number>, id: string): number {
+    const next = (mutations.get(id) ?? 0) + 1;
+    mutations.set(id, next);
+    return next;
+  }
 
   function snapshot(): AgentDirectoryState {
     return {
@@ -184,6 +196,7 @@ export function createAgentDirectoryStore(options: AgentDirectoryStoreOptions): 
       errorText,
       colorErrorText,
       updateErrorText,
+      updatingAgentId,
     };
   }
 
@@ -273,6 +286,7 @@ export function createAgentDirectoryStore(options: AgentDirectoryStoreOptions): 
       }
 
       const previous = all[index].color;
+      const mutation = claimMutation(colorMutations, agentId);
       all = all.map((agent) => (agent.id === agentId ? { ...agent, color: normalized } : agent));
       colorErrorText = undefined;
       notify();
@@ -280,6 +294,9 @@ export function createAgentDirectoryStore(options: AgentDirectoryStoreOptions): 
       try {
         await api.operation(connectionId, "colors.set", { agentId, color: normalized });
       } catch {
+        // Only the newest mutation may revert: an older failure would otherwise
+        // undo a colour a later request already stored successfully.
+        if (colorMutations.get(agentId) !== mutation) return;
         all = all.map((agent) => (agent.id === agentId ? { ...agent, color: previous } : agent));
         colorErrorText = COLOR_FAILED;
         notify();
@@ -295,6 +312,7 @@ export function createAgentDirectoryStore(options: AgentDirectoryStoreOptions): 
       if (Object.keys(payload).length < 2) return;
 
       const previous = all[index];
+      const mutation = claimMutation(agentMutations, agentId);
       all = all.map((agent) =>
         agent.id === agentId
           ? {
@@ -305,14 +323,20 @@ export function createAgentDirectoryStore(options: AgentDirectoryStoreOptions): 
           : agent,
       );
       updateErrorText = undefined;
+      updatingAgentId = agentId;
       notify();
 
       try {
         await api.operation(connectionId, "updateAgent", payload);
       } catch {
+        if (agentMutations.get(agentId) !== mutation) return;
         all = all.map((agent) => (agent.id === agentId ? previous : agent));
         updateErrorText = UPDATE_FAILED;
-        notify();
+      } finally {
+        if (agentMutations.get(agentId) === mutation) {
+          updatingAgentId = undefined;
+          notify();
+        }
       }
     },
   };

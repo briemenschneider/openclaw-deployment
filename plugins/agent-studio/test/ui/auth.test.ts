@@ -53,7 +53,9 @@ describe("Agent Studio authentication", () => {
 
     expect(app.textContent).toContain("Connect to your Gateway");
     expect(input.type).toBe("password");
-    expect(input.autocomplete).toBe("current-password");
+    // Not "current-password": the panel promises the token is never stored, so it
+    // must not invite the browser's password manager to save it either.
+    expect(input.autocomplete).toBe("off");
     expect(element<HTMLLabelElement>(app, 'label[for="gateway-token"]').textContent).toContain(
       "Gateway token",
     );

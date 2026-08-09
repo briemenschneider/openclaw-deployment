@@ -239,12 +239,15 @@ describe("session create component", () => {
     query<HTMLButtonElement>(element, ".session-new").click();
     expect(requests).toEqual([{ agentId: "atlas", options: {} }]);
 
-    query<HTMLButtonElement>(element, ".session-advanced").click();
-    await element.updateComplete;
     element.agentId = "zephyr";
     await element.updateComplete;
-    query<HTMLButtonElement>(element, ".session-submit").click();
+    query<HTMLButtonElement>(element, ".session-new").click();
+    expect(requests.at(-1)).toMatchObject({ agentId: "zephyr" });
 
+    // The advanced path is opened after the switch, so it carries the new id too.
+    query<HTMLButtonElement>(element, ".session-advanced").click();
+    await element.updateComplete;
+    query<HTMLButtonElement>(element, ".session-submit").click();
     expect(requests.at(-1)).toMatchObject({ agentId: "zephyr" });
   });
 
@@ -298,6 +301,45 @@ describe("session create component", () => {
 
     query<HTMLButtonElement>(element, ".session-copy").click();
     await vi.waitFor(() => expect(writeText).toHaveBeenCalledWith("atlas:2026-08-09"));
+  });
+
+  it("never shows one agent's session key under another agent", async () => {
+    const element = await renderCreate({
+      state: { status: "created", advancedOpen: false, key: "atlas:2026-08-09", agentId: "atlas" },
+    });
+    expect(element.querySelector(".session-key")).not.toBeNull();
+
+    element.agentId = "zephyr";
+    await element.updateComplete;
+
+    expect(element.querySelector(".session-key")).toBeNull();
+    expect(element.querySelector(".session-copy")).toBeNull();
+    expect(element.textContent).not.toContain("atlas:2026-08-09");
+  });
+
+  it("discards advanced fields typed for a different agent", async () => {
+    const element = await renderCreate();
+    const requests: Array<Record<string, unknown>> = [];
+    element.addEventListener("session-create", (event) => {
+      requests.push((event as CustomEvent<Record<string, unknown>>).detail);
+    });
+
+    query<HTMLButtonElement>(element, ".session-advanced").click();
+    await element.updateComplete;
+    query<HTMLInputElement>(element, "#session-label").value = "atlas nightly";
+    query<HTMLTextAreaElement>(element, "#session-task").value = "audit the atlas keys";
+
+    element.agentId = "zephyr";
+    await element.updateComplete;
+    expect(element.querySelector(".session-dialog")).toBeNull();
+
+    query<HTMLButtonElement>(element, ".session-advanced").click();
+    await element.updateComplete;
+    expect(query<HTMLInputElement>(element, "#session-label").value).toBe("");
+    expect(query<HTMLTextAreaElement>(element, "#session-task").value).toBe("");
+
+    query<HTMLButtonElement>(element, ".session-submit").click();
+    expect(requests.at(-1)).toEqual({ agentId: "zephyr", options: {} });
   });
 
   it("disables creation when the Gateway cannot create sessions", async () => {
@@ -355,5 +397,10 @@ describe("Agent Studio session integration", () => {
     expect(calls.at(-1)?.payload).toEqual({ agentId: "zephyr" });
     await vi.waitFor(() =>
       expect(app.querySelector(".session-key")?.textContent).toContain("zephyr:new"));
+
+    // Switching agents must not leave zephyr's key sitting in atlas's workspace.
+    query<HTMLButtonElement>(app, '.agent-row[data-agent-id="atlas"] .agent-select').click();
+    await app.updateComplete;
+    expect(app.querySelector(".session-key")).toBeNull();
   });
 });

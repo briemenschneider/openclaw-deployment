@@ -39,30 +39,52 @@ function stubApi(handlers: Handlers, calls: Call[] = []) {
   };
 }
 
-/** A tiny in-memory agent file server that mirrors the broker's projected shapes. */
-function fileServer(initial: Record<string, string> = { "AGENTS.md": "original agents" }) {
-  const contents = new Map(Object.entries(initial));
+/**
+ * A tiny in-memory agent file server that mirrors the broker's projected shapes.
+ *
+ * Storage is keyed by (agentId, name), not by name alone: a fixture that ignores
+ * the requested agent cannot tell a correctly addressed write from one aimed at
+ * the wrong agent, which is exactly the class of bug worth catching here.
+ */
+function fileServer(
+  initial: Record<string, string> = { "AGENTS.md": "original agents" },
+  agentId = "atlas",
+) {
+  const store = new Map<string, Map<string, string>>([
+    [agentId, new Map(Object.entries(initial))],
+  ]);
+  const forAgent = (id: string): Map<string, string> => {
+    const existing = store.get(id);
+    if (existing) return existing;
+    const created = new Map<string, string>();
+    store.set(id, created);
+    return created;
+  };
+
   return {
-    contents,
+    store,
+    /** Files of the agent the fixture was seeded for. */
+    contents: forAgent(agentId),
+    contentsOf: (id: string) => forAgent(id),
     handlers: {
-      listAgentFiles: async () => ({
-        agentId: "atlas",
-        files: PERSONA_FILES.map((name) => ({ name, missing: !contents.has(name) })),
-      }),
-      getAgentFile: async (payload: Record<string, unknown>) => {
-        const name = String(payload.name);
-        const content = contents.get(name);
+      listAgentFiles: async (payload: Record<string, unknown>) => {
+        const contents = forAgent(String(payload.agentId));
         return {
           agentId: payload.agentId,
-          file:
-            content === undefined
-              ? { name, missing: true }
-              : { name, content },
+          files: PERSONA_FILES.map((name) => ({ name, missing: !contents.has(name) })),
+        };
+      },
+      getAgentFile: async (payload: Record<string, unknown>) => {
+        const name = String(payload.name);
+        const content = forAgent(String(payload.agentId)).get(name);
+        return {
+          agentId: payload.agentId,
+          file: content === undefined ? { name, missing: true } : { name, content },
         };
       },
       setAgentFile: async (payload: Record<string, unknown>) => {
         const name = String(payload.name);
-        contents.set(name, String(payload.content));
+        forAgent(String(payload.agentId)).set(name, String(payload.content));
         return { ok: true, agentId: payload.agentId, file: { name, content: payload.content } };
       },
     } satisfies Handlers,
@@ -295,6 +317,129 @@ describe("persona store", () => {
     await store.selectFile("AGENTS.md");
 
     expect(store.getState().canSave).toBe(false);
+  });
+});
+
+describe("persona store agent isolation", () => {
+  /** Resolves the next call to `operation` for the given operation name. */
+  function gated(handlers: Handlers, gateOperation: string) {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    return {
+      release,
+      handlers: {
+        ...handlers,
+        [gateOperation]: async (payload: Record<string, unknown>) => {
+          await gate;
+          return await handlers[gateOperation](payload);
+        },
+      } as Handlers,
+    };
+  }
+
+  it("writes a save to the agent being edited, not the one selected mid-flight", async () => {
+    const server = fileServer({ "AGENTS.md": "atlas original" });
+    server.contentsOf("zephyr").set("AGENTS.md", "zephyr original");
+    const gate = gated(server.handlers, "getAgentFile");
+    const calls: Call[] = [];
+    const store = createPersonaStore({
+      api: stubApi(gate.handlers, calls),
+      connectionId,
+      features,
+    });
+
+    await store.selectAgent("atlas");
+    const loading = store.selectFile("AGENTS.md");
+    gate.release();
+    await loading;
+    store.setDraft("atlas rewritten");
+
+    const saving = store.save();
+    // The operator switches agents while the pre-save reload is on the wire.
+    await store.selectAgent("zephyr");
+    await saving;
+
+    expect(server.contentsOf("zephyr").get("AGENTS.md")).toBe("zephyr original");
+    expect(server.contentsOf("atlas").get("AGENTS.md")).toBe("atlas rewritten");
+    const writes = calls.filter((call) => call.operation === "setAgentFile");
+    expect(writes).toHaveLength(1);
+    expect(writes[0].payload.agentId).toBe("atlas");
+  });
+
+  it("caches a late file response under the agent it was requested for", async () => {
+    const server = fileServer({ "SOUL.md": "atlas soul" });
+    server.contentsOf("zephyr").set("AGENTS.md", "zephyr agents");
+    const gate = gated(server.handlers, "getAgentFile");
+    const store = createPersonaStore({
+      api: stubApi(gate.handlers),
+      connectionId,
+      features,
+    });
+
+    await store.selectAgent("atlas");
+    const loading = store.selectFile("SOUL.md");
+    await store.selectAgent("zephyr");
+    gate.release();
+    await loading;
+
+    await store.selectFile("SOUL.md");
+    expect(store.getState().file).toMatchObject({ missing: true, draft: "" });
+    expect(store.getState().files.find((file) => file.name === "SOUL.md")?.missing).toBe(true);
+  });
+
+  it("ignores a stale file-list response for a previously selected agent", async () => {
+    const server = fileServer({ "AGENTS.md": "atlas agents" });
+    server.contentsOf("zephyr").set("SOUL.md", "zephyr soul");
+    let held: (() => void) | undefined;
+    const store = createPersonaStore({
+      api: stubApi({
+        ...server.handlers,
+        listAgentFiles: async (payload) => {
+          if (payload.agentId === "atlas") {
+            await new Promise<void>((resolve) => {
+              held = resolve;
+            });
+          }
+          return await server.handlers.listAgentFiles(payload);
+        },
+      }),
+      connectionId,
+      features,
+    });
+
+    const first = store.selectAgent("atlas");
+    const second = store.selectAgent("zephyr");
+    await second;
+    held?.();
+    await first;
+
+    expect(store.getState().agentId).toBe("zephyr");
+    expect(store.getState().files.find((file) => file.name === "SOUL.md")?.missing).toBe(false);
+    expect(store.getState().files.find((file) => file.name === "AGENTS.md")?.missing).toBe(true);
+  });
+
+  it("does not strand an editor in a saving state when the agent changes", async () => {
+    const server = fileServer({ "AGENTS.md": "atlas original" });
+    const gate = gated(server.handlers, "setAgentFile");
+    const store = createPersonaStore({
+      api: stubApi(gate.handlers),
+      connectionId,
+      features,
+    });
+
+    await store.selectAgent("atlas");
+    await store.selectFile("AGENTS.md");
+    store.setDraft("atlas rewritten");
+    const saving = store.save();
+    await store.selectAgent("zephyr");
+    gate.release();
+    await saving;
+
+    await store.selectAgent("atlas");
+    await store.selectFile("AGENTS.md");
+    expect(store.getState().file).toMatchObject({ saving: false, dirty: false });
   });
 });
 

@@ -714,6 +714,14 @@ function createAgentDirectoryStore(options) {
   let errorText;
   let colorErrorText;
   let updateErrorText;
+  let updatingAgentId;
+  const colorMutations = /* @__PURE__ */ new Map();
+  const agentMutations = /* @__PURE__ */ new Map();
+  function claimMutation(mutations, id) {
+    const next = (mutations.get(id) ?? 0) + 1;
+    mutations.set(id, next);
+    return next;
+  }
   function snapshot() {
     return {
       status,
@@ -724,7 +732,8 @@ function createAgentDirectoryStore(options) {
       selectedAgent: all.find((agent) => agent.id === selectedId),
       errorText,
       colorErrorText,
-      updateErrorText
+      updateErrorText,
+      updatingAgentId
     };
   }
   function notify() {
@@ -798,12 +807,14 @@ function createAgentDirectoryStore(options) {
         return;
       }
       const previous = all[index].color;
+      const mutation = claimMutation(colorMutations, agentId);
       all = all.map((agent) => agent.id === agentId ? { ...agent, color: normalized } : agent);
       colorErrorText = void 0;
       notify();
       try {
         await api.operation(connectionId, "colors.set", { agentId, color: normalized });
       } catch {
+        if (colorMutations.get(agentId) !== mutation) return;
         all = all.map((agent) => agent.id === agentId ? { ...agent, color: previous } : agent);
         colorErrorText = COLOR_FAILED;
         notify();
@@ -817,6 +828,7 @@ function createAgentDirectoryStore(options) {
       if (patch.model !== void 0) payload.model = patch.model;
       if (Object.keys(payload).length < 2) return;
       const previous = all[index];
+      const mutation = claimMutation(agentMutations, agentId);
       all = all.map(
         (agent) => agent.id === agentId ? {
           ...agent,
@@ -825,13 +837,19 @@ function createAgentDirectoryStore(options) {
         } : agent
       );
       updateErrorText = void 0;
+      updatingAgentId = agentId;
       notify();
       try {
         await api.operation(connectionId, "updateAgent", payload);
       } catch {
+        if (agentMutations.get(agentId) !== mutation) return;
         all = all.map((agent) => agent.id === agentId ? previous : agent);
         updateErrorText = UPDATE_FAILED;
-        notify();
+      } finally {
+        if (agentMutations.get(agentId) === mutation) {
+          updatingAgentId = void 0;
+          notify();
+        }
       }
     }
   };
@@ -852,6 +870,7 @@ const LIST_FAILED = "Could not load this agent's files.";
 const LOAD_FAILED = "Could not load this file.";
 const SAVE_FAILED = "Could not save this file.";
 const TOO_LARGE = "This file is too large to save (60,000 characters max).";
+const KEY_SEPARATOR = "|";
 function isRecord$1(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -901,11 +920,12 @@ function createPersonaStore(options) {
   let files = [];
   let selected;
   let expired = false;
-  function cacheKey(name) {
-    return `${agentId ?? ""}\0${name}`;
+  let generation = 0;
+  function cacheKey(agent, name) {
+    return `${agent}${KEY_SEPARATOR}${name}`;
   }
   function current() {
-    return selected ? cache.get(cacheKey(selected)) : void 0;
+    return agentId && selected ? cache.get(cacheKey(agentId, selected)) : void 0;
   }
   function snapshot() {
     const file = current();
@@ -924,61 +944,68 @@ function createPersonaStore(options) {
     const state = snapshot();
     for (const listener of listeners) listener(state);
   }
-  function update(patch) {
-    const file = current();
-    if (!file || !selected) return;
-    cache.set(cacheKey(selected), { ...file, ...patch });
+  function patch(agent, name, changes) {
+    const key = cacheKey(agent, name);
+    const existing = cache.get(key);
+    if (!existing) return;
+    cache.set(key, { ...existing, ...changes });
     notify();
   }
-  function markMissing(name, missing) {
+  function update(changes) {
+    if (!agentId || !selected) return;
+    patch(agentId, selected, changes);
+  }
+  function markMissing(agent, name, missing) {
+    if (agent !== agentId) return;
     files = files.map((entry) => entry.name === name ? { ...entry, missing } : entry);
   }
-  function handleFailure(error, message) {
+  function noteFailure(agent, name, error, message) {
     if (isExpired(error)) {
       expired = true;
-      update({ saving: false });
-      notify();
+      patch(agent, name, { saving: false });
       return;
     }
-    update({ saving: false, errorText: message });
+    patch(agent, name, { saving: false, errorText: message });
   }
-  async function fetchContent(name) {
-    const response = await api.operation(connectionId, "getAgentFile", { agentId, name });
+  async function fetchContent(agent, name) {
+    const response = await api.operation(connectionId, "getAgentFile", { agentId: agent, name });
     return parseFileContent(response);
   }
-  async function writeContent(name, content) {
-    await api.operation(connectionId, "setAgentFile", { agentId, name, content });
+  async function writeContent(agent, name, content) {
+    await api.operation(connectionId, "setAgentFile", { agentId: agent, name, content });
   }
   async function saveDraft() {
     const file = current();
-    if (!file || !agentId || !features.setAgentFile) return;
+    const agent = agentId;
+    if (!file || !agent || !features.setAgentFile) return;
+    const name = file.name;
     if (file.draft.length > MAX_PERSONA_CHARACTERS) {
-      update({ errorText: TOO_LARGE, saved: false });
+      patch(agent, name, { errorText: TOO_LARGE, saved: false });
       return;
     }
-    update({ saving: true, errorText: void 0, saved: false });
+    patch(agent, name, { saving: true, errorText: void 0, saved: false });
     let serverContent;
     try {
-      serverContent = await fetchContent(file.name);
+      serverContent = await fetchContent(agent, name);
     } catch (error) {
-      handleFailure(error, SAVE_FAILED);
+      noteFailure(agent, name, error, SAVE_FAILED);
       return;
     }
     if ((serverContent ?? "") !== file.original) {
-      update({
+      patch(agent, name, {
         saving: false,
         conflict: { server: serverContent ?? "", local: file.draft }
       });
       return;
     }
     try {
-      await writeContent(file.name, file.draft);
+      await writeContent(agent, name, file.draft);
     } catch (error) {
-      handleFailure(error, SAVE_FAILED);
+      noteFailure(agent, name, error, SAVE_FAILED);
       return;
     }
-    markMissing(file.name, false);
-    update({
+    markMissing(agent, name, false);
+    patch(agent, name, {
       saving: false,
       saved: true,
       dirty: false,
@@ -997,6 +1024,8 @@ function createPersonaStore(options) {
       };
     },
     async selectAgent(nextAgentId) {
+      generation += 1;
+      const requestGeneration = generation;
       agentId = nextAgentId;
       selected = void 0;
       errorText = void 0;
@@ -1009,13 +1038,21 @@ function createPersonaStore(options) {
       }
       status = "loading";
       notify();
+      let entries;
+      let failure;
       try {
-        files = parseFileEntries(
+        entries = parseFileEntries(
           await api.operation(connectionId, "listAgentFiles", { agentId: nextAgentId })
         );
-        status = "ready";
       } catch (error) {
-        if (isExpired(error)) expired = true;
+        failure = error;
+      }
+      if (requestGeneration !== generation) return;
+      if (entries) {
+        files = entries;
+        status = "ready";
+      } else {
+        if (isExpired(failure)) expired = true;
         status = "error";
         files = [];
         errorText = LIST_FAILED;
@@ -1023,16 +1060,18 @@ function createPersonaStore(options) {
       notify();
     },
     async selectFile(name) {
-      if (!agentId || !available || !PERSONA_FILES.includes(name)) {
+      const agent = agentId;
+      if (!agent || !available || !PERSONA_FILES.includes(name)) {
         return;
       }
+      const requestGeneration = generation;
       selected = name;
-      const cached = cache.get(cacheKey(name));
-      if (cached) {
+      const key = cacheKey(agent, name);
+      if (cache.get(key)) {
         notify();
         return;
       }
-      cache.set(cacheKey(name), {
+      cache.set(key, {
         name,
         status: "loading",
         missing: false,
@@ -1045,19 +1084,18 @@ function createPersonaStore(options) {
       });
       notify();
       try {
-        const content = await fetchContent(name);
-        cache.set(cacheKey(name), editorFor(name, content));
-        markMissing(name, content === void 0);
+        const content = await fetchContent(agent, name);
+        cache.set(key, editorFor(name, content));
+        markMissing(agent, name, content === void 0);
       } catch (error) {
         if (isExpired(error)) expired = true;
-        cache.delete(cacheKey(name));
-        cache.set(cacheKey(name), {
+        cache.set(key, {
           ...editorFor(name, ""),
           status: "error",
           errorText: LOAD_FAILED
         });
       }
-      notify();
+      if (requestGeneration === generation) notify();
     },
     setDraft(text) {
       const file = current();
@@ -1071,26 +1109,36 @@ function createPersonaStore(options) {
     },
     async cancel() {
       const file = current();
-      if (!file || !agentId) return;
-      update({ status: "loading", errorText: void 0, conflict: void 0, saved: false });
+      const agent = agentId;
+      if (!file || !agent) return;
+      const name = file.name;
+      const requestGeneration = generation;
+      patch(agent, name, {
+        status: "loading",
+        errorText: void 0,
+        conflict: void 0,
+        saved: false
+      });
       try {
-        const content = await fetchContent(file.name);
-        cache.set(cacheKey(file.name), editorFor(file.name, content));
-        markMissing(file.name, content === void 0);
-        notify();
+        const content = await fetchContent(agent, name);
+        cache.set(cacheKey(agent, name), editorFor(name, content));
+        markMissing(agent, name, content === void 0);
+        if (requestGeneration === generation) notify();
       } catch (error) {
-        handleFailure(error, LOAD_FAILED);
-        update({ status: "ready" });
+        noteFailure(agent, name, error, LOAD_FAILED);
+        patch(agent, name, { status: "ready" });
       }
     },
     save: saveDraft,
     async resolveConflict(choice) {
       const file = current();
-      if (!file?.conflict) return;
+      const agent = agentId;
+      if (!file?.conflict || !agent) return;
+      const name = file.name;
       if (choice === "use-server") {
         const server = file.conflict.server;
-        markMissing(file.name, false);
-        update({
+        markMissing(agent, name, false);
+        patch(agent, name, {
           conflict: void 0,
           original: server,
           draft: server,
@@ -1100,7 +1148,7 @@ function createPersonaStore(options) {
         });
         return;
       }
-      update({ original: file.conflict.server, conflict: void 0, dirty: true });
+      patch(agent, name, { original: file.conflict.server, conflict: void 0, dirty: true });
       await saveDraft();
     }
   };
@@ -1233,9 +1281,17 @@ const _SessionCreate = class _SessionCreate extends i {
   }
   willUpdate(changed) {
     if (changed.has("state") && this.state.status === "created") this.localAdvanced = false;
+    if (changed.has("agentId") && changed.get("agentId") !== this.agentId) {
+      this.localAdvanced = false;
+      this.copied = false;
+    }
   }
   get advancedOpen() {
-    return this.localAdvanced || this.state.advancedOpen;
+    return (this.localAdvanced || this.state.advancedOpen) && !this.belongsToAnotherAgent();
+  }
+  /** True when `state` describes an agent other than the one now on screen. */
+  belongsToAnotherAgent() {
+    return this.state.agentId !== void 0 && this.state.agentId !== this.agentId;
   }
   render() {
     if (this.features?.createSession !== true) {
@@ -1247,7 +1303,7 @@ const _SessionCreate = class _SessionCreate extends i {
         </section>
       `;
     }
-    const busy = this.state.status === "creating";
+    const busy = this.state.status === "creating" && !this.belongsToAnotherAgent();
     return b`
       <section class="session-create" aria-label="Sessions">
         <div class="session-actions">
@@ -1268,9 +1324,9 @@ const _SessionCreate = class _SessionCreate extends i {
             Advanced
           </button>
         </div>
-        ${this.state.errorText ? b`<p class="session-error" role="alert">${this.state.errorText}</p>` : A}
+        ${this.state.errorText && !this.belongsToAnotherAgent() ? b`<p class="session-error" role="alert">${this.state.errorText}</p>` : A}
         ${this.advancedOpen ? this.renderDialog(busy) : A}
-        ${this.state.status === "created" && this.state.key ? this.renderResult(this.state.key) : A}
+        ${this.state.status === "created" && this.state.key && !this.belongsToAnotherAgent() ? this.renderResult(this.state.key) : A}
       </section>
     `;
   }
@@ -1614,10 +1670,28 @@ const _AgentOverview = class _AgentOverview extends i {
       </div>
     `;
   }
+  nameDraft(agent) {
+    return (this.draftName ?? agent.label).trim();
+  }
+  modelDraft(agent) {
+    return (this.draftModel ?? agent.model ?? "").trim();
+  }
+  /**
+   * The fields this submission would actually send. `agents.update` has no way to
+   * clear a model override, so an emptied model field is not a change.
+   */
+  changes(agent) {
+    const name = this.nameDraft(agent);
+    const model = this.modelDraft(agent);
+    const detail = { agentId: agent.id };
+    if (name && name !== agent.label) detail.name = name;
+    if (model && model !== (agent.model ?? "")) detail.model = model;
+    return detail;
+  }
   renderEditor(agent) {
     const name = this.draftName ?? agent.label;
     const model = this.draftModel ?? agent.model ?? "";
-    const dirty = name !== agent.label || model !== (agent.model ?? "");
+    const dirty = this.nameDraft(agent) !== agent.label || this.modelDraft(agent) !== "" && this.modelDraft(agent) !== (agent.model ?? "");
     return b`
       <div class="overview-editor">
         <label for="overview-name">Display name</label>
@@ -1667,15 +1741,11 @@ const _AgentOverview = class _AgentOverview extends i {
     `;
   }
   submit(agent) {
-    const name = (this.draftName ?? agent.label).trim();
-    const model = (this.draftModel ?? agent.model ?? "").trim();
-    if (!name) {
+    if (!this.nameDraft(agent)) {
       this.localError = "Name cannot be empty.";
       return;
     }
-    const detail = { agentId: agent.id };
-    if (name !== agent.label) detail.name = name;
-    if (model && model !== (agent.model ?? "")) detail.model = model;
+    const detail = this.changes(agent);
     if (Object.keys(detail).length < 2) return;
     this.localError = "";
     this.dispatchEvent(new CustomEvent("agent-update", { detail, bubbles: true }));
@@ -2035,7 +2105,7 @@ const _AgentStudioApp = class _AgentStudioApp extends i {
                     id="gateway-token"
                     name="gateway-token"
                     type="password"
-                    autocomplete="current-password"
+                    autocomplete="off"
                     spellcheck="false"
                     ?disabled=${this.connecting}
                     @keydown=${this.handleTokenKeydown}
@@ -2190,6 +2260,7 @@ const _AgentStudioApp = class _AgentStudioApp extends i {
         ${this.workspaceTab === "overview" ? b`<agent-overview
               .agent=${agent}
               .features=${this.features}
+              .saving=${this.directoryState?.updatingAgentId === agent?.id}
               .errorText=${this.directoryState?.updateErrorText}
               @agent-update=${this.handleAgentUpdate}
             ></agent-overview>` : b`<agent-persona
