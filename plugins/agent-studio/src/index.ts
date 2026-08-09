@@ -16,6 +16,21 @@ export function createAgentStudioColorStore(api: StateDirectoryRuntime): AgentCo
   return new AgentColorStore(api.runtime.state.resolveStateDir(process.env));
 }
 
+type Shutdownable = {
+  shutdown(): Promise<void>;
+};
+
+export async function shutdownAgentStudioResources(
+  sessions?: Shutdownable,
+  colors?: Shutdownable,
+): Promise<void> {
+  await Promise.allSettled(
+    [sessions, colors]
+      .filter((resource): resource is Shutdownable => resource !== undefined)
+      .map(async (resource) => await resource.shutdown()),
+  );
+}
+
 function loopbackGatewayUrl(config: unknown): string {
   if (typeof config !== "object" || config === null || !("gateway" in config)) {
     return "ws://127.0.0.1:18789";
@@ -70,8 +85,8 @@ export default definePluginEntry({
     });
     api.lifecycle?.registerRuntimeLifecycle({
       id: "agent-studio-panel-sessions",
-      description: "Close Agent Studio Gateway clients during runtime cleanup.",
-      cleanup: async () => await sessions?.shutdown(),
+      description: "Drain Agent Studio state and close Gateway clients during runtime cleanup.",
+      cleanup: async () => await shutdownAgentStudioResources(sessions, colors),
     });
   },
 });

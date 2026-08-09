@@ -1,10 +1,10 @@
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentColorStore } from "../src/color-store.js";
 import { createPanelRequestBroker } from "../src/gateway-operations.js";
-import { createAgentStudioColorStore } from "../src/index.js";
+import { createAgentStudioColorStore, shutdownAgentStudioResources } from "../src/index.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -12,6 +12,14 @@ async function temporaryStateDir(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "agent-studio-colors-"));
   temporaryDirectories.push(directory);
   return directory;
+}
+
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
 }
 
 afterEach(async () => {
@@ -168,5 +176,88 @@ describe("AgentColorStore", () => {
       ),
     ).resolves.toEqual({ ok: true, data: { colors: { main: "#abcdef" } } });
     expect(gatewayCalls).toBe(0);
+  });
+
+  it("drains an in-flight atomic write before shutdown and rejects later lifecycle use", async () => {
+    const stateDir = await temporaryStateDir();
+    const renameEntered = deferred();
+    const allowRename = deferred();
+    let renameCalls = 0;
+    const store = new AgentColorStore(stateDir, {
+      fileSystem: {
+        mkdir,
+        open,
+        readFile,
+        unlink,
+        async rename(from, to) {
+          renameCalls += 1;
+          renameEntered.resolve();
+          await allowRename.promise;
+          await rename(from, to);
+        },
+      },
+    });
+
+    const writing = store.set("main", "#123456");
+    await renameEntered.promise;
+    let shutdownFinished = false;
+    const stopping = store.shutdown().then(() => {
+      shutdownFinished = true;
+    });
+
+    await Promise.resolve();
+    expect(shutdownFinished).toBe(false);
+    await expect(store.set("later", "#abcdef")).rejects.toThrow("Color state unavailable");
+    await expect(store.list()).rejects.toThrow("Color state unavailable");
+
+    allowRename.resolve();
+    await expect(writing).resolves.toEqual({ ok: true, color: "#123456" });
+    await stopping;
+    expect(renameCalls).toBe(1);
+    await expect(readdir(join(stateDir, "agent-studio"))).resolves.toEqual(["colors.json"]);
+    await expect(store.shutdown()).resolves.toBeUndefined();
+  });
+
+  it("drains failed writes without unhandled rejection or a temporary file leak", async () => {
+    const stateDir = await temporaryStateDir();
+    const store = new AgentColorStore(stateDir, {
+      fileSystem: {
+        mkdir,
+        open,
+        readFile,
+        unlink,
+        async rename() {
+          throw new Error("controlled rename failure");
+        },
+      },
+    });
+
+    const writing = store.set("main", "#123456");
+    const stopping = store.shutdown();
+
+    await expect(writing).resolves.toEqual({ ok: false });
+    await expect(stopping).resolves.toBeUndefined();
+    await expect(readdir(join(stateDir, "agent-studio"))).resolves.toEqual([]);
+  });
+
+  it("waits for color shutdown even when session shutdown fails", async () => {
+    const calls: string[] = [];
+
+    await expect(
+      shutdownAgentStudioResources(
+        {
+          async shutdown() {
+            calls.push("sessions");
+            throw new Error("session failure");
+          },
+        },
+        {
+          async shutdown() {
+            calls.push("colors");
+          },
+        },
+      ),
+    ).resolves.toBeUndefined();
+    expect(calls.sort()).toEqual(["colors", "sessions"]);
   });
 });

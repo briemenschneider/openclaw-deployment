@@ -23,6 +23,15 @@ export type SetAgentColorResult =
   | { ok: true; color: string }
   | { ok: false };
 
+export class ColorStoreClosedError extends Error {
+  readonly code = "COLOR_STORE_CLOSED";
+
+  constructor() {
+    super("Color state unavailable");
+    this.name = "ColorStoreClosedError";
+  }
+}
+
 function emptyState(): ColorState {
   return { version: STATE_VERSION, agents: {} };
 }
@@ -65,6 +74,8 @@ export class AgentColorStore {
   readonly #stateFile: string;
   readonly #fileSystem: ColorStoreFileSystem;
   #mutationQueue: Promise<void> = Promise.resolve();
+  #closed = false;
+  #shutdownPromise: Promise<void> | undefined;
 
   constructor(stateDir: string, options: AgentColorStoreOptions = {}) {
     this.#directory = join(stateDir, PLUGIN_STATE_DIRECTORY);
@@ -73,10 +84,12 @@ export class AgentColorStore {
   }
 
   async list(): Promise<Record<string, string>> {
+    this.#throwIfClosed();
     return await this.#serialize(async () => cloneAgents(await this.#readState().then((state) => state.agents)));
   }
 
   async set(agentId: unknown, color: unknown): Promise<SetAgentColorResult> {
+    this.#throwIfClosed();
     const normalized = normalizeAgentColor(color);
     if (!isAgentId(agentId) || !normalized) return { ok: false };
 
@@ -90,6 +103,16 @@ export class AgentColorStore {
         return { ok: false };
       }
     });
+  }
+
+  async shutdown(): Promise<void> {
+    if (this.#shutdownPromise) return await this.#shutdownPromise;
+    this.#closed = true;
+    this.#shutdownPromise = this.#mutationQueue.then(
+      () => undefined,
+      () => undefined,
+    );
+    return await this.#shutdownPromise;
   }
 
   async #readState(): Promise<ColorState> {
@@ -145,5 +168,9 @@ export class AgentColorStore {
       () => undefined,
     );
     return await result;
+  }
+
+  #throwIfClosed(): void {
+    if (this.#closed) throw new ColorStoreClosedError();
   }
 }
