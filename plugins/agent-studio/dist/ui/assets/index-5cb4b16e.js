@@ -530,22 +530,28 @@ const FEATURE_NAMES = [
   "listSessions",
   "createSession"
 ];
+const ERROR_MESSAGES = {
+  CONNECT_FAILED: "Connection failed",
+  DISCONNECT_FAILED: "Disconnect failed",
+  CONNECTION_EXPIRED: "Connection expired",
+  OPERATION_FAILED: "Request failed"
+};
 class AgentStudioApiError extends Error {
   constructor(code) {
-    super(code === "CONNECT_FAILED" ? "Connection failed" : "Disconnect failed");
+    super(ERROR_MESSAGES[code]);
     this.code = code;
     this.name = "AgentStudioApiError";
   }
 }
 const CONNECTION_ID_PATTERN = /^[0-9a-f]{64}$/;
-function isRecord(value) {
+function isRecord$1(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function parseConnectResult(value) {
-  if (!isRecord(value) || value.ok !== true || !CONNECTION_ID_PATTERN.test(String(value.connectionId))) {
+  if (!isRecord$1(value) || value.ok !== true || !CONNECTION_ID_PATTERN.test(String(value.connectionId))) {
     return void 0;
   }
-  if (!isRecord(value.features)) return void 0;
+  if (!isRecord$1(value.features)) return void 0;
   const features = {};
   for (const name of FEATURE_NAMES) {
     if (typeof value.features[name] !== "boolean") return void 0;
@@ -583,12 +589,429 @@ function createAgentStudioApiClient(fetcher = globalThis.fetch) {
           JSON.stringify({ action: "disconnect", connectionId }),
           options?.keepalive
         );
-        if (!isRecord(value) || value.ok !== true) throw new Error("invalid response");
+        if (!isRecord$1(value) || value.ok !== true) throw new Error("invalid response");
       } catch {
         throw new AgentStudioApiError("DISCONNECT_FAILED");
       }
+    },
+    async operation(connectionId, operation, payload) {
+      let value;
+      try {
+        value = await post(
+          fetcher,
+          JSON.stringify({ action: "operation", connectionId, operation, payload })
+        );
+      } catch {
+        throw new AgentStudioApiError("OPERATION_FAILED");
+      }
+      if (!isRecord$1(value)) throw new AgentStudioApiError("OPERATION_FAILED");
+      if (value.ok === true) return value.data;
+      const code = isRecord$1(value.error) ? value.error.code : void 0;
+      throw new AgentStudioApiError(
+        code === "CONNECTION_EXPIRED" ? "CONNECTION_EXPIRED" : "OPERATION_FAILED"
+      );
     }
   };
+}
+const AGENT_COLOR_PALETTE = [
+  "#e2664f",
+  "#e39b3c",
+  "#d8c14a",
+  "#7fbf5a",
+  "#4fb59a",
+  "#4f9ed8",
+  "#7b7fe0",
+  "#b76fd0",
+  "#d6608f",
+  "#8c8f9a"
+];
+const AGENT_COLOR_NAMES = {
+  "#e2664f": "Coral",
+  "#e39b3c": "Amber",
+  "#d8c14a": "Brass",
+  "#7fbf5a": "Moss",
+  "#4fb59a": "Teal",
+  "#4f9ed8": "Azure",
+  "#7b7fe0": "Indigo",
+  "#b76fd0": "Orchid",
+  "#d6608f": "Rose",
+  "#8c8f9a": "Slate"
+};
+const SHORT_HEX = /^#?([0-9a-f])([0-9a-f])([0-9a-f])$/i;
+const LONG_HEX = /^#?[0-9a-f]{6}$/i;
+function normalizeHexColor(value) {
+  if (typeof value !== "string") return void 0;
+  const candidate = value.trim();
+  const short = SHORT_HEX.exec(candidate);
+  if (short) return `#${short[1]}${short[1]}${short[2]}${short[2]}${short[3]}${short[3]}`.toLowerCase();
+  if (LONG_HEX.test(candidate)) {
+    return `#${candidate.replace("#", "")}`.toLowerCase();
+  }
+  return void 0;
+}
+const LIST_UNAVAILABLE = "This Gateway does not expose agent listing.";
+const LIST_FAILED = "Agent directory unavailable.";
+const COLOR_INVALID = "Enter a color as #rrggbb.";
+const COLOR_FAILED = "Could not save that color. Reverting.";
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function optionalString(value) {
+  return typeof value === "string" && value.length > 0 ? value : void 0;
+}
+function parseAgent(value) {
+  if (!isRecord(value) || typeof value.id !== "string" || value.id.length === 0) return void 0;
+  const identity = isRecord(value.identity) ? value.identity : void 0;
+  const model = isRecord(value.model) ? value.model : void 0;
+  return {
+    id: value.id,
+    label: optionalString(identity?.name) ?? optionalString(value.name) ?? value.id,
+    emoji: optionalString(identity?.emoji),
+    model: optionalString(model?.primary)
+  };
+}
+function parseAgentsResponse(value) {
+  if (!isRecord(value)) return { agents: [] };
+  const agents = Array.isArray(value.agents) ? value.agents.map(parseAgent).filter((agent) => agent !== void 0) : [];
+  return { defaultId: optionalString(value.defaultId), agents };
+}
+function parseColorsResponse(value) {
+  if (!isRecord(value) || !isRecord(value.colors)) return {};
+  const colors = {};
+  for (const [agentId, color] of Object.entries(value.colors)) {
+    const normalized = normalizeHexColor(color);
+    if (normalized) colors[agentId] = normalized;
+  }
+  return colors;
+}
+function sortAgents(agents, defaultId) {
+  return [...agents].sort((left, right) => {
+    if (left.id === defaultId) return right.id === defaultId ? 0 : -1;
+    if (right.id === defaultId) return 1;
+    const leftLabel = left.label.toLowerCase();
+    const rightLabel = right.label.toLowerCase();
+    if (leftLabel !== rightLabel) return leftLabel < rightLabel ? -1 : 1;
+    if (left.id === right.id) return 0;
+    return left.id < right.id ? -1 : 1;
+  });
+}
+function filterAgents(agents, query) {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [...agents];
+  return agents.filter(
+    (agent) => agent.label.toLowerCase().includes(needle) || agent.id.toLowerCase().includes(needle)
+  );
+}
+function createAgentDirectoryStore(options) {
+  const { api, connectionId, features } = options;
+  const listeners = /* @__PURE__ */ new Set();
+  let status = "idle";
+  let all = [];
+  let query = "";
+  let selectedId;
+  let errorText;
+  let colorErrorText;
+  function snapshot() {
+    return {
+      status,
+      agents: filterAgents(all, query),
+      totalCount: all.length,
+      query,
+      selectedId,
+      errorText,
+      colorErrorText
+    };
+  }
+  function notify() {
+    const state = snapshot();
+    for (const listener of listeners) listener(state);
+  }
+  function applyColors(colors) {
+    all = all.map((agent) => ({ ...agent, color: colors[agent.id] }));
+  }
+  async function loadColors() {
+    try {
+      return parseColorsResponse(await api.operation(connectionId, "colors.list", {}));
+    } catch {
+      return {};
+    }
+  }
+  return {
+    getState: snapshot,
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+    async load() {
+      if (!features.listAgents) {
+        status = "error";
+        errorText = LIST_UNAVAILABLE;
+        notify();
+        return;
+      }
+      status = "loading";
+      errorText = void 0;
+      notify();
+      let listed;
+      try {
+        listed = parseAgentsResponse(await api.operation(connectionId, "listAgents", {}));
+      } catch {
+        status = "error";
+        all = [];
+        selectedId = void 0;
+        errorText = LIST_FAILED;
+        notify();
+        return;
+      }
+      const colors = await loadColors();
+      all = sortAgents(listed.agents, listed.defaultId);
+      applyColors(colors);
+      selectedId = all.some((agent) => agent.id === listed.defaultId) ? listed.defaultId : all[0]?.id;
+      status = "ready";
+      errorText = void 0;
+      notify();
+    },
+    select(agentId) {
+      if (!all.some((agent) => agent.id === agentId) || agentId === selectedId) return;
+      selectedId = agentId;
+      notify();
+    },
+    setQuery(next) {
+      if (next === query) return;
+      query = next;
+      notify();
+    },
+    async setColor(agentId, color) {
+      const normalized = normalizeHexColor(color);
+      const index = all.findIndex((agent) => agent.id === agentId);
+      if (index < 0) return;
+      if (!normalized) {
+        colorErrorText = COLOR_INVALID;
+        notify();
+        return;
+      }
+      const previous = all[index].color;
+      all = all.map((agent) => agent.id === agentId ? { ...agent, color: normalized } : agent);
+      colorErrorText = void 0;
+      notify();
+      try {
+        await api.operation(connectionId, "colors.set", { agentId, color: normalized });
+      } catch {
+        all = all.map((agent) => agent.id === agentId ? { ...agent, color: previous } : agent);
+        colorErrorText = COLOR_FAILED;
+        notify();
+      }
+    }
+  };
+}
+const IDLE_STATE = {
+  status: "idle",
+  agents: [],
+  totalCount: 0,
+  query: ""
+};
+const NAVIGATION_KEYS = /* @__PURE__ */ new Set(["ArrowDown", "ArrowUp", "Home", "End"]);
+const _AgentDirectory = class _AgentDirectory extends i {
+  constructor() {
+    super(...arguments);
+    this.state = IDLE_STATE;
+    this.customHexError = false;
+    this.handleQueryInput = (event) => {
+      const input = event.target;
+      this.dispatchEvent(
+        new CustomEvent("agent-query", { detail: { query: input.value }, bubbles: true })
+      );
+    };
+    this.handleCustomHexKeydown = (event) => {
+      if (event.key !== "Enter" || event.isComposing) return;
+      event.preventDefault();
+      if (this.openColorAgentId) this.applyCustomHex(this.openColorAgentId);
+    };
+    this.handleKeydown = (event) => {
+      if (event.key === "Escape" && this.openColorAgentId) {
+        event.stopPropagation();
+        this.closeColorPicker();
+        return;
+      }
+      if (!NAVIGATION_KEYS.has(event.key)) return;
+      const target = event.target;
+      if (!target?.classList.contains("agent-select")) return;
+      const buttons = [...this.querySelectorAll(".agent-select")];
+      const current = buttons.indexOf(target);
+      if (current < 0) return;
+      let next = current;
+      if (event.key === "ArrowDown") next = Math.min(current + 1, buttons.length - 1);
+      else if (event.key === "ArrowUp") next = Math.max(current - 1, 0);
+      else if (event.key === "Home") next = 0;
+      else next = buttons.length - 1;
+      event.preventDefault();
+      if (next === current) return;
+      buttons[next].focus();
+      const agentId = buttons[next].closest(".agent-row")?.getAttribute("data-agent-id");
+      if (agentId) this.emitSelect(agentId);
+    };
+  }
+  createRenderRoot() {
+    return this;
+  }
+  render() {
+    const { status, agents, totalCount, query } = this.state;
+    return b`
+      <div class="agent-directory" @keydown=${this.handleKeydown}>
+        <div class="directory-search">
+          <input
+            id="agent-search"
+            class="search-field"
+            type="search"
+            aria-label="Search agents"
+            placeholder="Search agents"
+            .value=${query}
+            ?disabled=${status === "error"}
+            @input=${this.handleQueryInput}
+          />
+        </div>
+        ${status === "error" ? b`<p class="directory-error" role="alert">${this.state.errorText}</p>` : A}
+        ${status === "loading" ? b`<p class="directory-status" data-state="loading" role="status">Loading agents…</p>` : A}
+        ${status === "ready" && totalCount === 0 ? b`<p class="directory-status" data-state="empty" role="status">
+              No agents available on this Gateway.
+            </p>` : A}
+        ${status === "ready" && totalCount > 0 && agents.length === 0 ? b`<p class="directory-status" data-state="no-match" role="status">
+              No agents match “${query}”.
+            </p>` : A}
+        ${agents.length > 0 ? b`<ul id="agent-list" class="agent-list" aria-label="Agents">
+              ${agents.map((agent, index) => this.renderAgent(agent, index))}
+            </ul>` : A}
+        ${this.state.colorErrorText ? b`<p class="directory-error" data-error="color" role="status">
+              ${this.state.colorErrorText}
+            </p>` : A}
+      </div>
+    `;
+  }
+  renderAgent(agent, index) {
+    const selected = agent.id === this.state.selectedId;
+    const swatchStyle = agent.color ? `background-color: ${agent.color}` : "";
+    return b`
+      <li class="agent-row" data-agent-id=${agent.id}>
+        <button
+          class="agent-select"
+          type="button"
+          aria-current=${selected ? "true" : "false"}
+          tabindex=${this.rovingTabIndex(index)}
+          @click=${() => this.emitSelect(agent.id)}
+        >
+          <span
+            class="agent-swatch"
+            data-color=${agent.color ?? ""}
+            style=${swatchStyle}
+            aria-hidden="true"
+          ></span>
+          <span class="agent-identity">
+            <span class="agent-label">${agent.emoji ? `${agent.emoji} ` : ""}${agent.label}</span>
+            <span class="agent-meta">${agent.model ?? agent.id}</span>
+          </span>
+          ${selected ? b`<span class="selected-marker" aria-hidden="true">▍</span
+                ><span class="visually-hidden">Selected</span>` : A}
+        </button>
+        <button
+          class="color-trigger"
+          type="button"
+          aria-label=${`Set color for ${agent.label}`}
+          aria-haspopup="dialog"
+          aria-expanded=${this.openColorAgentId === agent.id ? "true" : "false"}
+          @click=${() => this.toggleColorPicker(agent.id)}
+        >
+          <span aria-hidden="true">◍</span>
+        </button>
+        ${this.openColorAgentId === agent.id ? this.renderColorPicker(agent) : A}
+      </li>
+    `;
+  }
+  renderColorPicker(agent) {
+    return b`
+      <div
+        class="color-popover"
+        role="dialog"
+        aria-label=${`Color for ${agent.label}`}
+      >
+        <div class="palette" role="group" aria-label="Palette">
+          ${AGENT_COLOR_PALETTE.map(
+      (color) => b`
+              <button
+                class="palette-swatch"
+                type="button"
+                data-color=${color}
+                style=${`background-color: ${color}`}
+                aria-label=${AGENT_COLOR_NAMES[color] ?? color}
+                aria-pressed=${agent.color === color ? "true" : "false"}
+                @click=${() => this.emitColor(agent.id, color)}
+              ></button>
+            `
+    )}
+        </div>
+        <div class="custom-color">
+          <label class="visually-hidden" for="custom-hex">Custom color</label>
+          <input
+            id="custom-hex"
+            class="custom-hex"
+            type="text"
+            inputmode="text"
+            spellcheck="false"
+            placeholder="#rrggbb"
+            maxlength="7"
+            @keydown=${this.handleCustomHexKeydown}
+          />
+          <button class="custom-apply" type="button" @click=${() => this.applyCustomHex(agent.id)}>
+            Apply
+          </button>
+        </div>
+        ${this.customHexError ? b`<p class="hex-error" data-error="hex" role="alert">Enter a color as #rrggbb.</p>` : A}
+      </div>
+    `;
+  }
+  rovingTabIndex(index) {
+    const selectedIndex = this.state.agents.findIndex(
+      (agent) => agent.id === this.state.selectedId
+    );
+    const active = selectedIndex >= 0 ? selectedIndex : 0;
+    return index === active ? 0 : -1;
+  }
+  toggleColorPicker(agentId) {
+    this.openColorAgentId = this.openColorAgentId === agentId ? void 0 : agentId;
+    this.customHexError = false;
+  }
+  closeColorPicker() {
+    this.openColorAgentId = void 0;
+    this.customHexError = false;
+  }
+  applyCustomHex(agentId) {
+    const input = this.querySelector(".custom-hex");
+    const color = normalizeHexColor(input?.value);
+    if (!color) {
+      this.customHexError = true;
+      return;
+    }
+    this.emitColor(agentId, color);
+  }
+  emitSelect(agentId) {
+    this.dispatchEvent(new CustomEvent("agent-select", { detail: { agentId }, bubbles: true }));
+  }
+  emitColor(agentId, color) {
+    this.closeColorPicker();
+    this.dispatchEvent(
+      new CustomEvent("agent-color", { detail: { agentId, color }, bubbles: true })
+    );
+  }
+};
+_AgentDirectory.properties = {
+  state: { attribute: false },
+  openColorAgentId: { state: true },
+  customHexError: { state: true }
+};
+let AgentDirectory = _AgentDirectory;
+if (!customElements.get("agent-directory")) {
+  customElements.define("agent-directory", AgentDirectory);
 }
 const _AgentStudioApp = class _AgentStudioApp extends i {
   constructor() {
@@ -625,6 +1048,7 @@ const _AgentStudioApp = class _AgentStudioApp extends i {
         this.connectionId = result.connectionId;
         this.features = result.features;
         this.statusText = "Gateway connected";
+        this.startDirectory(result.connectionId, result.features);
       } catch {
         if (!this.isCurrentLifecycle(generation)) return;
         this.errorText = "Connection failed. Check the token and try again.";
@@ -651,6 +1075,18 @@ const _AgentStudioApp = class _AgentStudioApp extends i {
         await this.updateComplete;
         this.querySelector("#gateway-token")?.focus();
       }
+    };
+    this.handleAgentSelect = (event) => {
+      const { agentId } = event.detail;
+      this.directory?.select(agentId);
+    };
+    this.handleAgentQuery = (event) => {
+      const { query } = event.detail;
+      this.directory?.setQuery(query);
+    };
+    this.handleAgentColor = (event) => {
+      const { agentId, color } = event.detail;
+      void this.directory?.setColor(agentId, color);
     };
   }
   connectedCallback() {
@@ -799,13 +1235,16 @@ const _AgentStudioApp = class _AgentStudioApp extends i {
             <div class="directory-heading">
               <p class="eyebrow">Directory</p>
               <h2>Agents</h2>
-              <span class="count-readout" aria-label="No agents loaded">—</span>
+              <span class="count-readout" aria-label=${this.agentCountLabel()}>
+                ${this.directoryState?.status === "ready" ? this.directoryState.totalCount : "—"}
+              </span>
             </div>
-            <div class="directory-placeholder" role="status">
-              <span class="placeholder-glyph" aria-hidden="true">⌁</span>
-              <strong>Agent data arrives in the next stage</strong>
-              <span>The directory will load here after the agent surface is enabled.</span>
-            </div>
+            ${this.directoryState ? b`<agent-directory
+                  .state=${this.directoryState}
+                  @agent-select=${this.handleAgentSelect}
+                  @agent-query=${this.handleAgentQuery}
+                  @agent-color=${this.handleAgentColor}
+                ></agent-directory>` : A}
           </aside>
 
           <main id="agent-workspace" class="agent-workspace" aria-label="Agent workspace">
@@ -826,10 +1265,33 @@ const _AgentStudioApp = class _AgentStudioApp extends i {
       </div>
     `;
   }
+  agentCountLabel() {
+    if (this.directoryState?.status !== "ready") return "No agents loaded";
+    const count = this.directoryState.totalCount;
+    return count === 1 ? "1 agent" : `${count} agents`;
+  }
+  startDirectory(connectionId, features) {
+    const generation = this.lifecycleGeneration;
+    const store = createAgentDirectoryStore({ api: this.api, connectionId, features });
+    this.directory = store;
+    this.unsubscribeDirectory = store.subscribe((state) => {
+      if (!this.isCurrentLifecycle(generation) || this.directory !== store) return;
+      this.directoryState = state;
+    });
+    this.directoryState = store.getState();
+    void store.load();
+  }
+  stopDirectory() {
+    this.unsubscribeDirectory?.();
+    this.unsubscribeDirectory = void 0;
+    this.directory = void 0;
+    this.directoryState = void 0;
+  }
   isCurrentLifecycle(generation) {
     return this.mounted && generation === this.lifecycleGeneration;
   }
   clearLocalConnection() {
+    this.stopDirectory();
     this.connectionId = void 0;
     this.features = void 0;
     this.drawerOpen = false;
@@ -855,7 +1317,8 @@ _AgentStudioApp.properties = {
   disconnecting: { state: true },
   drawerOpen: { state: true },
   statusText: { state: true },
-  errorText: { state: true }
+  errorText: { state: true },
+  directoryState: { state: true }
 };
 let AgentStudioApp = _AgentStudioApp;
 if (!customElements.get("agent-studio-app")) {

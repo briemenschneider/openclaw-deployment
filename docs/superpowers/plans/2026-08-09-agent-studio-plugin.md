@@ -217,12 +217,12 @@ npm --prefix plugins/agent-studio test -- ui/auth ui/shell
 
 **Files:** `src/ui/agent-directory.ts`, `src/ui/agent-state.ts`, tests.
 
-- [ ] Test loading, empty, error, selection, search by name/id, deterministic sorting, and keyboard
+- [x] Test loading, empty, error, selection, search by name/id, deterministic sorting, and keyboard
   navigation.
-- [ ] Load agent summaries and colors after connection; select the default agent first.
-- [ ] Render color plus a non-color selected indicator.
-- [ ] Add an accessible color picker with a constrained palette and validated custom hex input.
-- [ ] Apply optimistic color changes and roll back on persistence failure.
+- [x] Load agent summaries and colors after connection; select the default agent first.
+- [x] Render color plus a non-color selected indicator.
+- [x] Add an accessible color picker with a constrained palette and validated custom hex input.
+- [x] Apply optimistic color changes and roll back on persistence failure.
 
 Run:
 

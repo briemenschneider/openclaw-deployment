@@ -21,6 +21,8 @@ async function connectedApp(): Promise<AgentStudioApp> {
   app.api = {
     connect: async () => ({ connectionId, features }),
     disconnect: vi.fn(),
+    operation: async (_id: string, operation: string) =>
+      operation === "listAgents" ? { agents: [] } : { colors: {} },
   };
   document.body.append(app);
   await app.updateComplete;
@@ -45,7 +47,9 @@ describe("Agent Studio shell", () => {
 
     expect(directory?.getAttribute("aria-label")).toBe("Agent directory");
     expect(directory?.textContent).toContain("Agents");
-    expect(directory?.textContent).toContain("Agent data arrives in the next stage");
+    await vi.waitFor(() =>
+      expect(directory?.textContent).toContain("No agents available on this Gateway."));
+    expect(directory?.querySelector("#agent-search")).not.toBeNull();
     expect(workspace?.getAttribute("aria-label")).toBe("Agent workspace");
     expect(workspace?.textContent).toContain("Select an agent to begin");
     expect(app.querySelector(".signal-rail")).not.toBeNull();

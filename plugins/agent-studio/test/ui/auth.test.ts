@@ -25,9 +25,11 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-async function render(api: AgentStudioApi): Promise<AgentStudioApp> {
+type ApiStub = Omit<AgentStudioApi, "operation"> & Partial<Pick<AgentStudioApi, "operation">>;
+
+async function render(api: ApiStub): Promise<AgentStudioApp> {
   const app = document.createElement("agent-studio-app") as AgentStudioApp;
-  app.api = api;
+  app.api = { operation: async () => ({}), ...api };
   document.body.append(app);
   await app.updateComplete;
   return app;

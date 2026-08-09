@@ -22,13 +22,15 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-async function mountMain(api: AgentStudioApi): Promise<AgentStudioApp> {
+type ApiStub = Omit<AgentStudioApi, "operation"> & Partial<Pick<AgentStudioApi, "operation">>;
+
+async function mountMain(api: ApiStub): Promise<AgentStudioApp> {
   document.body.innerHTML = '<div id="agent-studio-root"></div>';
   vi.resetModules();
   await import("../../src/ui/main.js");
   const app = document.querySelector<AgentStudioApp>("agent-studio-app");
   if (!app) throw new Error("main did not mount the app");
-  app.api = api;
+  app.api = { operation: async () => ({}), ...api };
   await app.updateComplete;
   return app;
 }

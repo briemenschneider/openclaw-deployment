@@ -1,10 +1,16 @@
-import { LitElement, html, type TemplateResult } from "lit";
+import { LitElement, html, nothing, type TemplateResult } from "lit";
 import {
   createAgentStudioApiClient,
   type AgentStudioApi,
   type AgentStudioFeatures,
   type DisconnectOptions,
 } from "./api-client.js";
+import {
+  createAgentDirectoryStore,
+  type AgentDirectoryState,
+  type AgentDirectoryStore,
+} from "./agent-state.js";
+import "./agent-directory.js";
 
 export type { AgentStudioApi } from "./api-client.js";
 
@@ -17,6 +23,7 @@ export class AgentStudioApp extends LitElement {
     drawerOpen: { state: true },
     statusText: { state: true },
     errorText: { state: true },
+    directoryState: { state: true },
   };
 
   api: AgentStudioApi = createAgentStudioApiClient();
@@ -30,6 +37,9 @@ export class AgentStudioApp extends LitElement {
   private mounted = false;
   private lifecycleGeneration = 0;
   private readonly disconnects = new Map<string, Promise<void>>();
+  private directoryState?: AgentDirectoryState;
+  private directory?: AgentDirectoryStore;
+  private unsubscribeDirectory?: () => void;
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -184,13 +194,18 @@ export class AgentStudioApp extends LitElement {
             <div class="directory-heading">
               <p class="eyebrow">Directory</p>
               <h2>Agents</h2>
-              <span class="count-readout" aria-label="No agents loaded">—</span>
+              <span class="count-readout" aria-label=${this.agentCountLabel()}>
+                ${this.directoryState?.status === "ready" ? this.directoryState.totalCount : "—"}
+              </span>
             </div>
-            <div class="directory-placeholder" role="status">
-              <span class="placeholder-glyph" aria-hidden="true">⌁</span>
-              <strong>Agent data arrives in the next stage</strong>
-              <span>The directory will load here after the agent surface is enabled.</span>
-            </div>
+            ${this.directoryState
+              ? html`<agent-directory
+                  .state=${this.directoryState}
+                  @agent-select=${this.handleAgentSelect}
+                  @agent-query=${this.handleAgentQuery}
+                  @agent-color=${this.handleAgentColor}
+                ></agent-directory>`
+              : nothing}
           </aside>
 
           <main id="agent-workspace" class="agent-workspace" aria-label="Agent workspace">
@@ -237,6 +252,7 @@ export class AgentStudioApp extends LitElement {
       this.connectionId = result.connectionId;
       this.features = result.features;
       this.statusText = "Gateway connected";
+      this.startDirectory(result.connectionId, result.features);
     } catch {
       if (!this.isCurrentLifecycle(generation)) return;
       this.errorText = "Connection failed. Check the token and try again.";
@@ -266,11 +282,52 @@ export class AgentStudioApp extends LitElement {
     }
   };
 
+  private agentCountLabel(): string {
+    if (this.directoryState?.status !== "ready") return "No agents loaded";
+    const count = this.directoryState.totalCount;
+    return count === 1 ? "1 agent" : `${count} agents`;
+  }
+
+  private startDirectory(connectionId: string, features: AgentStudioFeatures): void {
+    const generation = this.lifecycleGeneration;
+    const store = createAgentDirectoryStore({ api: this.api, connectionId, features });
+    this.directory = store;
+    this.unsubscribeDirectory = store.subscribe((state) => {
+      if (!this.isCurrentLifecycle(generation) || this.directory !== store) return;
+      this.directoryState = state;
+    });
+    this.directoryState = store.getState();
+    void store.load();
+  }
+
+  private stopDirectory(): void {
+    this.unsubscribeDirectory?.();
+    this.unsubscribeDirectory = undefined;
+    this.directory = undefined;
+    this.directoryState = undefined;
+  }
+
+  private readonly handleAgentSelect = (event: Event): void => {
+    const { agentId } = (event as CustomEvent<{ agentId: string }>).detail;
+    this.directory?.select(agentId);
+  };
+
+  private readonly handleAgentQuery = (event: Event): void => {
+    const { query } = (event as CustomEvent<{ query: string }>).detail;
+    this.directory?.setQuery(query);
+  };
+
+  private readonly handleAgentColor = (event: Event): void => {
+    const { agentId, color } = (event as CustomEvent<{ agentId: string; color: string }>).detail;
+    void this.directory?.setColor(agentId, color);
+  };
+
   private isCurrentLifecycle(generation: number): boolean {
     return this.mounted && generation === this.lifecycleGeneration;
   }
 
   private clearLocalConnection(): void {
+    this.stopDirectory();
     this.connectionId = undefined;
     this.features = undefined;
     this.drawerOpen = false;

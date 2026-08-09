@@ -23,13 +23,29 @@ export type DisconnectOptions = {
 export type AgentStudioApi = {
   connect(token: string): Promise<ConnectResult>;
   disconnect(connectionId: string, options?: DisconnectOptions): Promise<void>;
+  operation(
+    connectionId: string,
+    operation: string,
+    payload: Record<string, unknown>,
+  ): Promise<unknown>;
 };
 
-export type AgentStudioApiErrorCode = "CONNECT_FAILED" | "DISCONNECT_FAILED";
+export type AgentStudioApiErrorCode =
+  | "CONNECT_FAILED"
+  | "DISCONNECT_FAILED"
+  | "CONNECTION_EXPIRED"
+  | "OPERATION_FAILED";
+
+const ERROR_MESSAGES: Readonly<Record<AgentStudioApiErrorCode, string>> = {
+  CONNECT_FAILED: "Connection failed",
+  DISCONNECT_FAILED: "Disconnect failed",
+  CONNECTION_EXPIRED: "Connection expired",
+  OPERATION_FAILED: "Request failed",
+};
 
 export class AgentStudioApiError extends Error {
   constructor(readonly code: AgentStudioApiErrorCode) {
-    super(code === "CONNECT_FAILED" ? "Connection failed" : "Disconnect failed");
+    super(ERROR_MESSAGES[code]);
     this.name = "AgentStudioApiError";
   }
 }
@@ -89,6 +105,24 @@ export function createAgentStudioApiClient(fetcher: typeof fetch = globalThis.fe
       } catch {
         throw new AgentStudioApiError("DISCONNECT_FAILED");
       }
+    },
+
+    async operation(connectionId, operation, payload) {
+      let value: unknown;
+      try {
+        value = await post(
+          fetcher,
+          JSON.stringify({ action: "operation", connectionId, operation, payload }),
+        );
+      } catch {
+        throw new AgentStudioApiError("OPERATION_FAILED");
+      }
+      if (!isRecord(value)) throw new AgentStudioApiError("OPERATION_FAILED");
+      if (value.ok === true) return value.data;
+      const code = isRecord(value.error) ? value.error.code : undefined;
+      throw new AgentStudioApiError(
+        code === "CONNECTION_EXPIRED" ? "CONNECTION_EXPIRED" : "OPERATION_FAILED",
+      );
     },
   };
 }
