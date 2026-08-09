@@ -9,7 +9,9 @@
   --rule-strong: #3a3f4b;
   --ink: #f3f1eb;
   --muted: #959ba8;
-  --dim: #646b78;
+  /* 4.56:1 on --surface-raised, the darkest pairing it appears on. The previous
+     #646b78 was 3.25:1, below AA for the 9-11px text this token is used on. */
+  --dim: #7c838f;
   --coral: #ef6a5b;
   --coral-deep: #bd4f45;
   --signal-cyan: #59b9ba;

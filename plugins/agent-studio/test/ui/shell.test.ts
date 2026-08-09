@@ -74,6 +74,30 @@ describe("Agent Studio shell", () => {
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
   });
 
+  it("keeps every text token at WCAG AA against the darkest surface", async () => {
+    const css = await readFile(resolve(process.cwd(), "src/ui/styles.css"), "utf8");
+    const token = (name: string): string => {
+      const match = new RegExp(`--${name}:\\s*(#[0-9a-f]{6})`, "i").exec(css);
+      if (!match) throw new Error(`missing --${name}`);
+      return match[1];
+    };
+    const luminance = (hex: string): number => {
+      const channels = [1, 3, 5]
+        .map((index) => parseInt(hex.slice(index, index + 2), 16) / 255)
+        .map((value) => (value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4));
+      return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+    };
+    const ratio = (a: string, b: string): number => {
+      const [light, dark] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+      return (light + 0.05) / (dark + 0.05);
+    };
+
+    const raised = token("surface-raised");
+    for (const name of ["ink", "muted", "dim", "coral", "signal-amber", "signal-cyan"]) {
+      expect({ name, ratio: ratio(token(name), raised) >= 4.5 }).toEqual({ name, ratio: true });
+    }
+  });
+
   it("defines visible focus and reduced-motion behavior", async () => {
     const css = await readFile(resolve(process.cwd(), "src/ui/styles.css"), "utf8");
     expect(css).toMatch(/:focus-visible\s*\{/);
