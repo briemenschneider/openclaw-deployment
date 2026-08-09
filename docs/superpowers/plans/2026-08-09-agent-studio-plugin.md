@@ -273,14 +273,22 @@ npm --prefix plugins/agent-studio test -- ui/session-create
 
 **Files:** `deploy-agent-studio.ps1`, `docs/agent-studio.md`, README update.
 
-- [ ] Build UI and runtime into `dist/`; inspect the output for accidental source maps or secrets.
-- [ ] Run `npm pack --dry-run`, assert the manifest and UI assets are present, then create the
+- [x] Build UI and runtime into `dist/`; inspect the output for accidental source maps or secrets.
+- [x] Run `npm pack --dry-run`, assert the manifest and UI assets are present, then create the
   tarball.
-- [ ] Make `deploy-agent-studio.ps1` copy the tarball into the `openclaw` container, run
+- [x] Make `deploy-agent-studio.ps1` copy the tarball into the `openclaw` container, run
   `openclaw plugins install npm-pack:<tarball> --force`, enable `agent-studio`, restart the Gateway
   through the deployment's established mechanism, and inspect runtime JSON.
-- [ ] Document first use, token handling, updating, disabling, uninstalling, and rollback.
-- [ ] Ensure the deploy script never prints `.env` or the Gateway token.
+- [x] Document first use, token handling, updating, disabling, uninstalling, and rollback.
+- [x] Ensure the deploy script never prints `.env` or the Gateway token.
+
+> The script is written and its local half (install, typecheck, test, build, output inspection,
+> packed-file assertions) has been run against the real build. The container-side half has not been
+> executed yet; running it is the first step of Task 12.
+>
+> Note: the committed lockfile is `pnpm-lock.yaml` but this plan's commands and the deploy script
+> use npm, so `npm ci` has nothing to read. The script uses `npm install`. Settle on one package
+> manager before release.
 
 Verification commands:
 

@@ -14,6 +14,8 @@ Verified working against OpenClaw **2026.7.1**, pinned by digest
 | `.env.example` | Template — copy to `.env`, fill in keys |
 | `.env` | Your keys. Gitignored. Never commit. |
 | `ollama-provider.patch.json5` | Ollama provider block, in `config patch` format |
+| `plugins/agent-studio/` | Agent Studio dashboard plugin — see [docs/agent-studio.md](docs/agent-studio.md) |
+| `deploy-agent-studio.ps1` | Build, pack, and install Agent Studio into the container |
 
 ## Setup
 
@@ -221,6 +223,13 @@ openclaw agents bind local --bind <channel>                  # route automatical
 ```
 
 With no bindings, the `default: true` agent handles everything.
+
+### Agent Studio plugin
+
+`plugins/agent-studio` adds a dashboard tab for colour-coding agents, editing their core persona
+files, and starting agent-scoped sessions — without patching the OpenClaw image or dashboard
+bundle. Deploy it with `.\deploy-agent-studio.ps1`; setup, token handling, and rollback are in
+[docs/agent-studio.md](docs/agent-studio.md).
 
 ### Delegation / agent-to-agent
 
