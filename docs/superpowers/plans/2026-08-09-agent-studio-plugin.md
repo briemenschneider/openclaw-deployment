@@ -254,14 +254,14 @@ npm --prefix plugins/agent-studio test -- ui/persona ui/overview
 
 **Files:** `src/ui/session-create.ts`, `test/ui/session-create.test.ts`.
 
-- [ ] Test that the primary action always sends the selected `agentId` and no stale agent id.
-- [ ] Test the advanced fields: label, model, task/message, and worktree.
-- [ ] Validate fields, prevent double submission, and keep the dialog open on failure.
-- [ ] After success, display the session key, provide copy-to-clipboard, and instruct the user to
+- [x] Test that the primary action always sends the selected `agentId` and no stale agent id.
+- [x] Test the advanced fields: label, model, task/message, and worktree.
+- [x] Validate fields, prevent double submission, and keep the dialog open on failure.
+- [x] After success, display the session key, provide copy-to-clipboard, and instruct the user to
   select it from OpenClaw's Sessions list.
-- [ ] When the response is lost, query the visible sessions before offering retry to reduce
+- [x] When the response is lost, query the visible sessions before offering retry to reduce
   duplicates.
-- [ ] Do not attempt `window.parent` navigation, DOM injection, or nested dashboard rendering.
+- [x] Do not attempt `window.parent` navigation, DOM injection, or nested dashboard rendering.
 
 Run:
 

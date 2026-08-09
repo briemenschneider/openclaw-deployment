@@ -17,9 +17,16 @@ import {
   type PersonaState,
   type PersonaStore,
 } from "./persona-state.js";
+import {
+  createSessionController,
+  type SessionController,
+  type SessionCreateState,
+  type SessionOptions,
+} from "./session-create.js";
 import "./agent-directory.js";
 import "./agent-overview.js";
 import "./agent-persona.js";
+import "./session-create.js";
 
 export type { AgentStudioApi } from "./api-client.js";
 
@@ -34,6 +41,7 @@ export class AgentStudioApp extends LitElement {
     errorText: { state: true },
     directoryState: { state: true },
     personaState: { state: true },
+    sessionState: { state: true },
     workspaceTab: { state: true },
   };
 
@@ -56,6 +64,9 @@ export class AgentStudioApp extends LitElement {
   private persona?: PersonaStore;
   private unsubscribePersona?: () => void;
   private personaSyncing = false;
+  private sessionState?: SessionCreateState;
+  private sessions?: SessionController;
+  private unsubscribeSessions?: () => void;
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -254,6 +265,13 @@ export class AgentStudioApp extends LitElement {
     const agent = this.directoryState?.selectedAgent;
     return html`
       <div class="workspace-body">
+        <session-create
+          .agentId=${agent?.id}
+          .features=${this.features}
+          .state=${this.sessionState ?? { status: "idle", advancedOpen: false }}
+          @session-create=${this.handleSessionCreate}
+          @session-advanced=${this.handleSessionAdvanced}
+        ></session-create>
         <div id="workspace-tabs" class="workspace-tabs" role="tablist" aria-label="Agent sections">
           ${(["overview", "persona"] as const).map(
             (tab) => html`
@@ -371,10 +389,22 @@ export class AgentStudioApp extends LitElement {
       this.personaState = state;
     });
 
+    const sessions = createSessionController({ api: this.api, connectionId, features });
+    this.sessions = sessions;
+    this.sessionState = sessions.getState();
+    this.unsubscribeSessions = sessions.subscribe((state) => {
+      if (!this.isCurrentLifecycle(generation) || this.sessions !== sessions) return;
+      this.sessionState = state;
+    });
+
     void store.load();
   }
 
   private stopDirectory(): void {
+    this.unsubscribeSessions?.();
+    this.unsubscribeSessions = undefined;
+    this.sessions = undefined;
+    this.sessionState = undefined;
     this.unsubscribeDirectory?.();
     this.unsubscribeDirectory = undefined;
     this.directory = undefined;
@@ -435,6 +465,18 @@ export class AgentStudioApp extends LitElement {
       event as CustomEvent<{ agentId: string; name?: string; model?: string }>
     ).detail;
     void this.directory?.updateAgent(agentId, { name, model });
+  };
+
+  private readonly handleSessionCreate = (event: Event): void => {
+    const { agentId, options } = (
+      event as CustomEvent<{ agentId: string; options: SessionOptions }>
+    ).detail;
+    void this.sessions?.create(agentId, options);
+  };
+
+  private readonly handleSessionAdvanced = (event: Event): void => {
+    const { open } = (event as CustomEvent<{ open: boolean }>).detail;
+    this.sessions?.setAdvancedOpen(open);
   };
 
   private readonly handlePersonaSelect = (event: Event): void => {
