@@ -1,7 +1,20 @@
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import { AgentColorStore } from "./color-store.js";
 import { createPanelRequestBroker } from "./gateway-operations.js";
 import { createAgentStudioHttpHandler } from "./http-handler.js";
 import { PanelSessionBroker } from "./panel-sessions.js";
+
+type StateDirectoryRuntime = {
+  runtime: {
+    state: {
+      resolveStateDir(environment: NodeJS.ProcessEnv): string;
+    };
+  };
+};
+
+export function createAgentStudioColorStore(api: StateDirectoryRuntime): AgentColorStore {
+  return new AgentColorStore(api.runtime.state.resolveStateDir(process.env));
+}
 
 function loopbackGatewayUrl(config: unknown): string {
   if (typeof config !== "object" || config === null || !("gateway" in config)) {
@@ -23,14 +36,22 @@ export default definePluginEntry({
   description: "Operator workspace for Agent Studio.",
   register(api) {
     let sessions: PanelSessionBroker | undefined;
+    let colors: AgentColorStore | undefined;
     const getSessions = () => {
       sessions ??= new PanelSessionBroker({ gatewayUrl: loopbackGatewayUrl(api.config) });
       return sessions;
+    };
+    const getColors = () => {
+      colors ??= createAgentStudioColorStore(api);
+      return colors;
     };
     const broker = createPanelRequestBroker({
       connect: async (token, sourceIp) => await getSessions().connect(token, sourceIp),
       disconnect: async (connectionId) => await getSessions().disconnect(connectionId),
       getOperationSession: (connectionId) => getSessions().getOperationSession(connectionId),
+    }, {
+      list: async () => await getColors().list(),
+      set: async (agentId, color) => await getColors().set(agentId, color),
     });
 
     api.session.controls.registerControlUiDescriptor({

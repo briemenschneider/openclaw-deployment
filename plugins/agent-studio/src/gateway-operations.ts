@@ -1,4 +1,5 @@
 import type { GatewayClient } from "openclaw/plugin-sdk/gateway-runtime";
+import { normalizeAgentColor, type AgentColorStore } from "./color-store.js";
 import type { PanelRequest } from "./protocol.js";
 
 export type GatewayOperationClient = Pick<GatewayClient, "request">;
@@ -517,15 +518,75 @@ type PanelSessionAccess = {
   getOperationSession(connectionId: string): PanelOperationSession | undefined;
 };
 
+type ColorStoreAccess = Pick<AgentColorStore, "list" | "set">;
+
+type ColorOperationResult =
+  | { ok: true; data: { colors: Record<string, string> } }
+  | { ok: true; data: { agentId: string; color: string } }
+  | { ok: false; error: { code: "COLOR_STORE_UNAVAILABLE" | "INVALID_PAYLOAD"; message: string } };
+
+function colorOperationError(
+  code: "COLOR_STORE_UNAVAILABLE" | "INVALID_PAYLOAD",
+  message: string,
+): ColorOperationResult {
+  return { ok: false, error: { code, message } };
+}
+
+function isColorOperation(value: string): value is "colors.list" | "colors.set" {
+  return value === "colors.list" || value === "colors.set";
+}
+
+async function executeColorOperation(
+  colors: ColorStoreAccess,
+  operation: "colors.list" | "colors.set",
+  payload: unknown,
+): Promise<ColorOperationResult> {
+  if (!isRecord(payload)) return colorOperationError("INVALID_PAYLOAD", "Invalid operation payload");
+  if (operation === "colors.list") {
+    if (!hasExactlyKeys(payload, [])) return colorOperationError("INVALID_PAYLOAD", "Invalid operation payload");
+    try {
+      return { ok: true, data: { colors: await colors.list() } };
+    } catch {
+      return colorOperationError("COLOR_STORE_UNAVAILABLE", "Color state unavailable");
+    }
+  }
+
+  const color = normalizeAgentColor(payload.color);
+  if (
+    !hasExactlyKeys(payload, ["agentId", "color"]) ||
+    !isAgentId(payload.agentId) ||
+    !color
+  ) {
+    return colorOperationError("INVALID_PAYLOAD", "Invalid operation payload");
+  }
+  const result = await colors.set(payload.agentId, color);
+  return result.ok
+    ? { ok: true, data: { agentId: payload.agentId, color: result.color } }
+    : colorOperationError("COLOR_STORE_UNAVAILABLE", "Color state unavailable");
+}
+
 export function createPanelRequestBroker(sessions: PanelSessionAccess): {
   handle(request: PanelRequest, sourceIp: string): Promise<unknown>;
-} {
+};
+export function createPanelRequestBroker(
+  sessions: PanelSessionAccess,
+  colors: ColorStoreAccess,
+): {
+  handle(request: PanelRequest, sourceIp: string): Promise<unknown>;
+};
+export function createPanelRequestBroker(
+  sessions: PanelSessionAccess,
+  colors?: ColorStoreAccess,
+): { handle(request: PanelRequest, sourceIp: string): Promise<unknown> } {
   return {
     async handle(request, sourceIp) {
       if (request.action === "connect") return await sessions.connect(request.token, sourceIp);
       if (request.action === "disconnect") return await sessions.disconnect(request.connectionId);
       const session = sessions.getOperationSession(request.connectionId);
       if (!session) return operationError("CONNECTION_EXPIRED", "Connection expired");
+      if (colors && isColorOperation(request.operation)) {
+        return await executeColorOperation(colors, request.operation, request.payload);
+      }
       return await executeGatewayOperation(
         session.client,
         session.advertisedMethods,
