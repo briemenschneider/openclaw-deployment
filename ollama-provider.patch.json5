@@ -1,4 +1,4 @@
-// Ollama provider block — already applied to the running instance.
+// Ollama provider block — matches the running instance as of 2026-08-09.
 //
 // Apply with:
 //   docker compose exec openclaw node openclaw.mjs config patch --file <path> --dry-run
@@ -6,15 +6,87 @@
 //
 // NOTE: a top-level {"ollama": {...}} block is NOT valid in 2026.7.1 and fails
 // schema validation. Providers live under models.providers.<id>.
+//
+// Port is 11435, not 11434: the openclaw container reaches Windows Ollama through
+// the `ollama-fwd` socat forwarder on the docker0 gateway. See docker-compose.yml
+// for why the container-facing port must differ from the upstream port.
+//
+// api is "ollama" (the native adapter), NOT "openai-responses", and the baseUrl
+// therefore carries no /v1 suffix. The native adapter is what makes
+// compat.thinkingFormat work; the OpenAI-compat path produced hard failures.
+//
+// num_ctx and contextWindow must be declared TOGETHER and kept EQUAL. Ollama's
+// real context is 4096 unless num_ctx says otherwise, no matter what
+// contextWindow claims, and OpenClaw budgets against contextWindow — so a
+// mismatch silently truncates. But do not shrink the window to "save" memory
+// either: a full-context agent has a ~12,785-token baseline before the user types
+// anything, and baseline + compaction reserve must fit. See
+// docs/winevents-known-issues.md for the measured numbers behind both traps.
 {
   models: {
     mode: "merge",
     providers: {
       ollama: {
-        baseUrl: "http://host.docker.internal:11434/v1",
+        baseUrl: "http://host.docker.internal:11435",
         apiKey: "ollama-local",
-        api: "openai-responses",
+        api: "ollama",
+        // Only fields that are actually stored are listed. `config get` also
+        // reports resolved defaults (api, input, reasoning); writing those back
+        // as literals would pin today's defaults forever, so they stay out.
+        models: [
+          {
+            id: "qwen3.6:27b",
+            name: "Qwen 3.6 27B",
+            // Held lower than the 9B because this one already spills past the GPU.
+            contextWindow: 32768,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            compat: { supportsTools: true, thinkingFormat: "qwen" },
+            maxTokens: 8192,
+            params: { num_ctx: 32768 },
+          },
+          {
+            id: "qwen3.5:9b",
+            name: "Qwen 3.5 9B",
+            // 64K measured at 7.6GB KV — still 100% GPU on a 12GiB card.
+            contextWindow: 65536,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            compat: { supportsTools: true, thinkingFormat: "qwen" },
+            maxTokens: 8192,
+            params: { num_ctx: 65536 },
+          },
+          // HAZARD: the two entries below declare contextWindow 262144 with no
+          // matching num_ctx, so their real window is Ollama's 4096 default —
+          // exactly the mismatch described above. They are unused today; pair the
+          // values before pointing an agent at either one.
+          {
+            id: "code-reviewer-max:latest",
+            name: "Code Reviewer Max",
+            contextWindow: 262144,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          },
+          {
+            id: "code-reviewer:latest",
+            name: "Code Reviewer",
+            contextWindow: 262144,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          },
+        ],
       },
     },
   },
 }
+
+// Model fallback is deliberately NOT patched here.
+//
+// `config patch` REPLACES arrays, so putting agents.list in this file would wipe
+// every agent except the one listed. It refuses outright, which is the only
+// reason that isn't a footgun. Set the per-agent fallback with `config set`,
+// which addresses a single element:
+//
+//   docker compose exec openclaw node openclaw.mjs config set 'agents.list[0].model' \
+//     '{"primary":"ollama/qwen3.5:9b","fallbacks":["ollama/qwen3.6:27b"]}' --strict-json
+//
+// Setting agents.defaults.model.fallbacks alone does NOT cover `main`: an agent
+// whose agents.list entry carries its own `model` overrides the default outright,
+// fallbacks included. Verified by pointing the default primary at a dead provider
+// and watching `main` keep answering from qwen3.5:9b.
