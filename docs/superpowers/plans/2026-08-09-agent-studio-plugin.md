@@ -286,9 +286,8 @@ npm --prefix plugins/agent-studio test -- ui/session-create
 > packed-file assertions) has been run against the real build. The container-side half has not been
 > executed yet; running it is the first step of Task 12.
 >
-> Note: the committed lockfile is `pnpm-lock.yaml` but this plan's commands and the deploy script
-> use npm, so `npm ci` has nothing to read. The script uses `npm install`. Settle on one package
-> manager before release.
+> The toolchain was settled on npm (2026-08-09): `package-lock.json` is committed, the pnpm
+> lockfile and workspace file were removed, and the deploy script installs with `npm ci`.
 
 Verification commands:
 

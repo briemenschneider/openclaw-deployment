@@ -89,7 +89,9 @@ if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
 if (-not (Test-Path $pluginRoot)) { throw "plugin source not found: $pluginRoot" }
 
 Write-Host 'installing plugin dependencies...'
-Invoke-Npm install --no-audit --no-fund
+# ci, not install: the deploy must build from the committed lockfile, not from
+# whatever the registry resolves today.
+Invoke-Npm ci --no-audit --no-fund
 
 if (-not $SkipTests) {
     Write-Host 'typechecking...'
